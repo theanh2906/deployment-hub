@@ -1,0 +1,15 @@
+# Binaries and build outputs
+bin/
+*.exe
+*.out
+*.test
+
+# Local runtime data and secrets
+data/
+.env
+.env.*
+!.env.example
+
+# OS / IDE files
+.DS_Store
+Thumbs.db

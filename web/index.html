@@ -1,0 +1,3625 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeploymentHub — Modern PaaS Flagship</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.85); }
+    }
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -24; }
+    }
+    .pulse-dot {
+      animation: pulseDot 1.4s ease-in-out infinite;
+    }
+    .dash-flow {
+      stroke-dasharray: 6 6;
+      animation: dashFlow 1.2s linear infinite;
+    }
+    .dot-canvas {
+      background-image: radial-gradient(var(--border) 1.2px, transparent 1.2px);
+      background-size: 18px 18px;
+    }
+    .thin-scroll::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .thin-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .thin-scroll::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 9999px;
+    }
+    .phone-frame {
+      width: 390px;
+      max-width: 100%;
+      height: 780px;
+    }
+  </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased min-h-screen">
+  <!-- Top Control Bar: Brand + VPS Telemetry + Desktop/Mobile Viewport Switcher -->
+  <header class="sticky top-0 z-30 bg-[var(--sidebar)]/95 backdrop-blur-md border-b border-[var(--border)] px-4 py-2.5">
+    <div class="max-w-[1480px] mx-auto flex flex-wrap items-center justify-between gap-3">
+      <!-- Brand -->
+      <div class="flex items-center gap-2.5">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-sky-500 text-white flex items-center justify-center shadow-sm shadow-indigo-500/25 shrink-0">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+            <line x1="12" y1="22.08" x2="12" y2="12"/>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-sm text-[var(--foreground)] tracking-tight">DeploymentHub</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-500 border border-indigo-500/30 font-medium">Flagship PaaS</span>
+          </div>
+          <p id="headerSubtitle" class="text-xs text-[var(--muted-foreground)] hidden sm:block">Git-to-Docker E2E • Hybrid File + AI Auto-Detect</p>
+        </div>
+      </div>
+
+      <!-- VPS Host Status Pills -->
+      <div id="vpsHeaderPills" class="flex flex-wrap items-center gap-1.5 text-xs"></div>
+
+      <!-- Theme Toggle + Viewport Switcher -->
+      <div class="flex flex-wrap items-center gap-2">
+        <button id="btnThemeToggle" type="button" onclick="toggleTheme()" title="Chuyển Dark / Light Mode" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)] hover:bg-[var(--accent)] transition">
+          <svg class="w-3.5 h-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span>Dark</span>
+        </button>
+
+        <div class="flex items-center gap-1 p-1 rounded-xl bg-[var(--content)] border border-[var(--border)]">
+          <button id="btnDesktopView" type="button" onclick="setViewport('desktop')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+              <line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+            <span>Desktop View</span>
+          </button>
+          <button id="btnMobileView" type="button" onclick="setViewport('mobile')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+              <line x1="12" y1="18" x2="12.01" y2="18"/>
+            </svg>
+            <span>Mobile View (390px)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace Shell -->
+  <div id="appWorkspace"></div>
+
+  <!-- Toast Stack -->
+  <div id="toastStack" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none max-w-sm"></div>
+
+  <script>
+    // =========================================================================
+    // 1. STACK PRESETS, DETECTION PROFILES & BRAND DATA
+    // =========================================================================
+    const STACK_PRESETS = {
+      nextjs: {
+        id: 'nextjs',
+        label: 'Next.js',
+        badge: 'Next.js 15 SSR',
+        category: 'Frontend',
+        footprint: '~145 MB',
+        strategy: "Auto-detected package.json (next 15.x) → Multi-stage Node 20 Alpine với output: 'standalone'",
+        buildCmd: 'npm ci && npm run build',
+        startCmd: 'node .next/standalone/server.js',
+        portMapping: '3000 -> 443 (HTTPS)',
+        filename: 'Dockerfile',
+        envVars: [
+          { key: 'NODE_ENV', value: 'production', secret: false },
+          { key: 'PORT', value: '3000', secret: false },
+          { key: 'NEXT_PUBLIC_API_URL', value: 'https://api.anna.dev', secret: false },
+          { key: 'AUTH_SECRET', value: 'dh_sec_92kfa810x99a', secret: true }
+        ],
+        buildLogs: [
+          '[1/5] Clone repository & kiểm tra next.config.mjs...',
+          '[2/5] Phát hiện Next.js 15 App Router — kích hoạt output: "standalone"',
+          '[3/5] npm ci (cached 1,240 packages in 3.2s)',
+          '[3/5] ▲ Next.js 15.1.4 — Creating an optimized production build...',
+          '[3/5] ✓ Compiled successfully in 14.8s | Static (12) + Dynamic SSR (8)',
+          '[4/5] COPY .next/standalone → node:20-alpine runner (~145 MB)',
+          '[4/5] Healthcheck GET http://127.0.0.1:3000/api/health → 200 OK',
+          '[5/5] Traefik Auto-SSL cấp chứng chỉ Let\'s Encrypt thành công!'
+        ]
+      },
+      spa: {
+        id: 'spa',
+        label: 'React / Angular',
+        badge: 'React / Angular SPA',
+        category: 'Frontend',
+        footprint: '~24 MB',
+        strategy: 'Auto-detected Vite / Angular CLI → Multi-stage Node Build + Nginx Alpine Static (~24 MB)',
+        buildCmd: 'npm ci && npm run build',
+        startCmd: 'nginx -g "daemon off;"',
+        portMapping: '80 -> 443 (HTTPS)',
+        filename: 'Dockerfile',
+        envVars: [
+          { key: 'NODE_ENV', value: 'production', secret: false },
+          { key: 'VITE_API_BASE', value: 'https://api.anna.dev/v1', secret: false },
+          { key: 'NGINX_SPA_FALLBACK', value: 'try_files $uri /index.html', secret: false }
+        ],
+        buildLogs: [
+          '[1/5] Clone repository & đọc package.json...',
+          '[2/5] Phát hiện SPA (Vite / Angular) — chọn Nginx 1.27 Alpine static runner',
+          '[3/5] npm ci && npm run build → dist/assets (gzip + brotli)',
+          '[3/5] ✓ Bundle tối ưu: index.html + main.js (184 KB gzipped)',
+          '[4/5] COPY /app/dist → /usr/share/nginx/html (Final image: 24.2 MB)',
+          '[4/5] Healthcheck GET http://127.0.0.1:80/ → 200 OK',
+          '[5/5] Traefik route & HTTP/2 compression đã kích hoạt!'
+        ]
+      },
+      go: {
+        id: 'go',
+        label: 'Go API',
+        badge: 'Go 1.22 REST API',
+        category: 'Backend API',
+        footprint: '~18 MB',
+        strategy: 'Auto-detected go.mod → Static CGO_ENABLED=0 Binary + Distroless (~18 MB)',
+        buildCmd: 'CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server ./cmd/api',
+        startCmd: '/server',
+        portMapping: '8080 -> 443 (HTTPS)',
+        filename: 'Dockerfile',
+        envVars: [
+          { key: 'GO_ENV', value: 'production', secret: false },
+          { key: 'PORT', value: '8080', secret: false },
+          { key: 'DATABASE_URL', value: 'postgres://app:***@postgres:5432/prod', secret: true },
+          { key: 'JWT_SIGNING_KEY', value: 'go_jwt_7731a9c4', secret: true }
+        ],
+        buildLogs: [
+          '[1/5] Clone repository & tải go.mod dependencies...',
+          '[2/5] Phát hiện Go 1.22 — chọn Static Binary + gcr.io/distroless',
+          '[3/5] go mod download && CGO_ENABLED=0 go build -ldflags="-s -w"',
+          '[3/5] ✓ Binary compiled: /out/server (12.4 MB)',
+          '[4/5] Copy binary sang distroless/static-debian12 (Final image: 18.1 MB)',
+          '[4/5] Healthcheck GET http://127.0.0.1:8080/healthz → 200 OK (2ms)',
+          '[5/5] Zero-downtime container swap hoàn tất qua Traefik!'
+        ]
+      },
+      rust: {
+        id: 'rust',
+        label: 'Rust API',
+        badge: 'Rust Actix-Web',
+        category: 'Backend API',
+        footprint: '~22 MB',
+        strategy: 'Auto-detected Cargo.toml → Cargo Release Build + Alpine Minimal (~22 MB)',
+        buildCmd: 'cargo build --release --locked',
+        startCmd: './target/release/api-engine',
+        portMapping: '9000 -> 443 (HTTPS / WSS)',
+        filename: 'Dockerfile',
+        envVars: [
+          { key: 'RUST_LOG', value: 'info,actix_web=info', secret: false },
+          { key: 'BIND_ADDR', value: '0.0.0.0:9000', secret: false },
+          { key: 'REDIS_URL', value: 'redis://redis:6379/0', secret: true }
+        ],
+        buildLogs: [
+          '[1/5] Clone repository & kiểm tra Cargo.lock...',
+          '[2/5] Phát hiện Rust Crate — dùng cargo-chef layer cache + Alpine runtime',
+          '[3/5] Compiling actix-web v4.9.0, tokio v1.41.0, serde v1.0...',
+          '[3/5] Finished `release` profile [optimized] target(s) in 26.4s',
+          '[4/5] Strip debug symbols → Final image alpine:3.20 (22.4 MB)',
+          '[4/5] Healthcheck GET http://127.0.0.1:9000/ready → 200 OK',
+          '[5/5] Traefik WebSocket (WSS) + TLS 1.3 route đã sẵn sàng!'
+        ]
+      },
+      compose: {
+        id: 'compose',
+        label: 'FE+BE Compose',
+        badge: 'Full-stack FE+BE Compose',
+        category: 'Full-stack Compose',
+        footprint: '3 Services',
+        strategy: 'Auto-detected /frontend + /backend → Multi-service Docker Compose + Internal Network',
+        buildCmd: 'docker compose build --parallel',
+        startCmd: 'docker compose up -d --remove-orphans',
+        portMapping: 'FE :80 + BE :8080 (/api/*) + DB :5432',
+        filename: 'docker-compose.yml',
+        envVars: [
+          { key: 'COMPOSE_PROJECT_NAME', value: 'fullstack-app', secret: false },
+          { key: 'POSTGRES_USER', value: 'app_admin', secret: false },
+          { key: 'POSTGRES_PASSWORD', value: 'pg_s3cur3_9182', secret: true },
+          { key: 'API_INTERNAL_URL', value: 'http://backend:8080', secret: false }
+        ],
+        buildLogs: [
+          '[1/5] Clone monorepo (/apps/web, /apps/api) & phân tích cấu trúc...',
+          '[2/5] Sinh docker-compose.yml: web (Nginx) + api (Go) + postgres:16-alpine',
+          '[3/5] Building service [web] & [api] song song với Docker BuildKit...',
+          '[3/5] ✓ web: 25 MB | api: 19 MB | postgres:16-alpine pulled',
+          '[4/5] Tạo bridge network internal-net & kiểm tra DB readiness...',
+          '[4/5] Healthcheck web:80 (200 OK) + api:8080/health (200 OK)',
+          '[5/5] Path routing: / → web:80 | /api/* → api:8080 (Let\'s Encrypt SSL)!'
+        ]
+      }
+    };
+
+    const OAUTH_REPOS = [
+      { repo: 'anh-tang/nextjs-ai-dashboard', preset: 'nextjs', desc: 'Next.js 15 App Router + Tailwind' },
+      { repo: 'anh-tang/angular-saas-portal', preset: 'spa', desc: 'Angular 18 Standalone SPA' },
+      { repo: 'anh-tang/go-billing-service', preset: 'go', desc: 'Go 1.22 Gin / Fiber Microservice' },
+      { repo: 'anh-tang/rust-order-matcher', preset: 'rust', desc: 'Rust Actix-Web Low-Latency Engine' },
+      { repo: 'anh-tang/ecommerce-monorepo', preset: 'compose', desc: 'FE React + BE Go + PostgreSQL' }
+    ];
+
+    const AUTO_DETECT_PROFILES = {
+      nextjs: {
+        files: ['package.json (next 15)', 'pnpm-lock.yaml', 'next.config.mjs', 'prisma/schema.prisma', '.env.example'],
+        aiInsight: '✨ AI: Phát hiện Prisma & Sharp — tự động thêm apk add --no-cache openssl libc6-compat & đồng bộ 4 biến từ .env.example.',
+        fileNote: 'Rule-based: Đọc package.json + next.config.mjs → khớp preset Next.js Standalone (~145 MB).'
+      },
+      spa: {
+        files: ['package.json', 'angular.json / vite.config.ts', 'package-lock.json', '.env.example'],
+        aiInsight: '✨ AI: Phát hiện SPA Client Router + assets lớn — tự động bật Nginx gzip/brotli & SPA try_files fallback.',
+        fileNote: 'Rule-based: Đọc package.json + vite/angular config → khớp preset SPA Static + Nginx (~24 MB).'
+      },
+      go: {
+        files: ['go.mod (go 1.22)', 'go.sum', 'cmd/api/main.go', '.env.example'],
+        aiInsight: '✨ AI: Phát hiện TLS outbound + sqlx/pgx — tự động tiêm ca-certificates & tối ưu CGO_ENABLED=0 distroless.',
+        fileNote: 'Rule-based: Đọc go.mod + cmd/api → khớp preset Go Static Binary (~18 MB).'
+      },
+      rust: {
+        files: ['Cargo.toml', 'Cargo.lock', 'src/main.rs', '.env.example'],
+        aiInsight: '✨ AI: Phát hiện actix-web + native TLS — tự động thêm pkg-config openssl-dev musl-dev & cargo-chef cache.',
+        fileNote: 'Rule-based: Đọc Cargo.toml + Cargo.lock → khớp preset Rust Release Binary (~22 MB).'
+      },
+      compose: {
+        files: ['apps/web/package.json', 'apps/api/go.mod', 'docker-compose.yml', '.env.example'],
+        aiInsight: '✨ AI: Phát hiện Monorepo FE+BE+Postgres — tự động gắn internal-net, healthcheck service_healthy & route /api/*.',
+        fileNote: 'Rule-based: Đọc apps/web + apps/api + docker-compose.yml → khớp preset Full-stack Compose (3 Services).'
+      }
+    };
+
+    // =========================================================================
+    // 2. THEME ENGINE (DEFAULT DARK + LIGHT) & APPLICATION STATE
+    // =========================================================================
+    const THEME_PALETTES = {
+      dark: {
+        '--background': '#090d16',
+        '--sidebar': '#0d1322',
+        '--card': '#111827',
+        '--content': '#172033',
+        '--border': '#1e293b',
+        '--foreground': '#f8fafc',
+        '--muted-foreground': '#94a3b8',
+        '--placeholder': '#64748b',
+        '--primary': '#6366f1',
+        '--primary-foreground': '#ffffff',
+        '--secondary': '#1e293b',
+        '--secondary-foreground': '#e2e8f0',
+        '--accent': '#1e293b'
+      },
+      light: {
+        '--background': '#f8fafc',
+        '--sidebar': '#ffffff',
+        '--card': '#ffffff',
+        '--content': '#f1f5f9',
+        '--border': '#e2e8f0',
+        '--foreground': '#0f172a',
+        '--muted-foreground': '#64748b',
+        '--placeholder': '#94a3b8',
+        '--primary': '#4f46e5',
+        '--primary-foreground': '#ffffff',
+        '--secondary': '#f1f5f9',
+        '--secondary-foreground': '#1e293b',
+        '--accent': '#e2e8f0'
+      }
+    };
+
+    function getSavedTheme() {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const val = localStorage.getItem('dh_theme');
+          if (val === 'light' || val === 'dark') return val;
+        }
+      } catch {}
+      return 'dark';
+    }
+
+    const state = {
+      theme: getSavedTheme(),
+      viewport: 'desktop',
+      activeTab: 'dashboard',
+      dashboardView: 'grid', // 'grid' | 'topology'
+      selectedTopologyId: 'nextjs-commerce-store',
+      dockerSubTab: 'containers',
+      searchQuery: '',
+      stackFilter: 'Tất cả',
+      api: {
+        httpMode: typeof window !== 'undefined' && Boolean(window.location && String(window.location.protocol || '').startsWith('http')),
+        connected: false,
+        connecting: false,
+        runtimeMode: 'standalone',
+        lastError: ''
+      },
+      vps: {
+        host: 'vps-sg-01',
+        ip: '103.184.210.12',
+        cpu: 24,
+        ramUsed: 3.8,
+        ramTotal: 8.0,
+        diskPct: 42,
+        dockerVersion: 'Docker v26.1',
+        sshPort: '22',
+        sshUser: 'deploy',
+        connMode: 'socket-proxy',
+        socketEndpoint: 'tcp://docker-proxy:2375',
+        connStatus: 'Connected • 14ms'
+      },
+      projects: [
+        {
+          id: 'nextjs-commerce-store',
+          name: 'nextjs-commerce-store',
+          stackKey: 'nextjs',
+          stack: 'Next.js 15 SSR',
+          category: 'Frontend',
+          domain: 'store.anna.dev',
+          repo: 'anh-tang/nextjs-commerce-store',
+          branch: 'main',
+          commit: 'sha-8f92a1',
+          commitMsg: 'feat: stripe webhook idempotency',
+          status: 'Running',
+          cpu: 6.2,
+          ramMb: 210,
+          ramLimitMb: 512,
+          port: '3000',
+          reqPerSec: '640 req/s',
+          trend: [18, 22, 19, 28, 25, 34, 31, 42, 38],
+          updatedAt: '4 phút trước',
+          logs: [
+            '2026-11-14T01:02:11Z [next] ▲ Next.js 15.1.4 (standalone)',
+            '2026-11-14T01:02:11Z [next] - Local: http://0.0.0.0:3000',
+            '2026-11-14T01:02:12Z [health] GET /api/health 200 OK (3ms)',
+            '2026-11-14T01:05:40Z [http] GET /products/pro-plan 200 in 18ms',
+            '2026-11-14T01:07:03Z [http] POST /api/checkout 200 in 42ms'
+          ]
+        },
+        {
+          id: 'go-payment-gateway',
+          name: 'go-payment-gateway',
+          stackKey: 'go',
+          stack: 'Go 1.22 REST API',
+          category: 'Backend API',
+          domain: 'api.anna.dev',
+          repo: 'anh-tang/go-payment-gateway',
+          branch: 'main',
+          commit: 'v1.4.2',
+          commitMsg: 'perf: tune pgx connection pool',
+          status: 'Running',
+          cpu: 3.4,
+          ramMb: 28,
+          ramLimitMb: 256,
+          port: '8080',
+          reqPerSec: '490 req/s',
+          trend: [12, 14, 16, 15, 22, 20, 26, 24, 29],
+          updatedAt: '18 phút trước',
+          logs: [
+            '2026-11-14T00:50:01Z [go-api] Starting payment-gateway v1.4.2 on :8080',
+            '2026-11-14T00:50:01Z [db] Connected PostgreSQL pool (min=4 max=20)',
+            '2026-11-14T01:04:12Z [gin] POST /v1/payments/intent 201 (6.1ms)',
+            '2026-11-14T01:06:55Z [gin] GET /healthz 200 (0.8ms)'
+          ]
+        },
+        {
+          id: 'rust-realtime-engine',
+          name: 'rust-realtime-engine',
+          stackKey: 'rust',
+          stack: 'Rust Actix-Web',
+          category: 'Backend API',
+          domain: 'ws.anna.dev',
+          repo: 'anh-tang/rust-realtime-engine',
+          branch: 'feat/ws-cluster',
+          commit: 'c47e12a',
+          commitMsg: 'optimize epoll worker threads',
+          status: 'Building...',
+          cpu: 41.0,
+          ramMb: 640,
+          ramLimitMb: 1024,
+          port: '9000',
+          reqPerSec: '312 wss',
+          trend: [14, 18, 29, 44, 52, 68, 74, 82, 85],
+          updatedAt: 'Đang build Stage 3/5',
+          logs: [
+            '2026-11-14T01:08:10Z [build] Cloning feat/ws-cluster @ c47e12a',
+            '2026-11-14T01:08:14Z [cargo] Downloading crates (actix-web 4.9, tokio 1.41)',
+            '2026-11-14T01:08:32Z [cargo] Compiling rust-realtime-engine v0.9.5 (release)',
+            '2026-11-14T01:08:51Z [cargo] Linking static musl binary...'
+          ]
+        },
+        {
+          id: 'crm-fullstack-monorepo',
+          name: 'crm-fullstack-monorepo',
+          stackKey: 'compose',
+          stack: 'Angular 18 FE + Go BE + Postgres',
+          category: 'Full-stack Compose',
+          domain: 'crm.anna.dev',
+          repo: 'anh-tang/crm-fullstack-monorepo',
+          branch: 'production',
+          commit: '7a20f9c',
+          commitMsg: 'compose: add healthchecks & internal net',
+          status: 'Running',
+          cpu: 9.1,
+          ramMb: 480,
+          ramLimitMb: 1024,
+          port: '80 / 8080',
+          reqPerSec: '270 req/s',
+          trend: [20, 24, 21, 25, 30, 28, 33, 31, 36],
+          updatedAt: '1 giờ trước',
+          logs: [
+            '2026-11-14T00:12:04Z [compose] Network crm_internal ready',
+            '2026-11-14T00:12:06Z [postgres] database system is ready to accept connections',
+            '2026-11-14T00:12:08Z [crm-be] Go API listening on :8080',
+            '2026-11-14T00:12:09Z [crm-fe] Nginx serving Angular 18 dist on :80'
+          ]
+        },
+        {
+          id: 'react-admin-portal',
+          name: 'react-admin-portal',
+          stackKey: 'spa',
+          stack: 'React + Vite SPA',
+          category: 'Frontend',
+          domain: 'admin.anna.dev',
+          repo: 'anh-tang/react-admin-portal',
+          branch: 'main',
+          commit: '91d4e21',
+          commitMsg: 'chore: upgrade vite 5.4 & router',
+          status: 'Stopped',
+          cpu: 0,
+          ramMb: 0,
+          ramLimitMb: 128,
+          port: '80',
+          reqPerSec: '0 req/s',
+          trend: [10, 8, 6, 4, 2, 0, 0, 0, 0],
+          updatedAt: '2 ngày trước',
+          logs: [
+            '2026-11-12T14:20:01Z [nginx] 1.27.2 worker processes started',
+            '2026-11-12T18:05:19Z [docker] Container stopped by user @anh-tang (SIGTERM)'
+          ]
+        }
+      ],
+      containers: [
+        {
+          id: 'cnt-next',
+          name: 'dh-nextjs-commerce-store',
+          project: 'nextjs-commerce-store',
+          stackKey: 'nextjs',
+          image: 'nextjs-commerce:sha-8f92a1',
+          previousTags: ['nextjs-commerce:sha-7c10b4', 'nextjs-commerce:sha-60e219'],
+          status: 'Running',
+          cpuPct: 6.2,
+          ramMb: 210,
+          ramLimitMb: 512,
+          ports: '127.0.0.1:3000->3000/tcp',
+          uptime: 'Up 4 phút',
+          logs: [
+            '[next] ▲ Next.js 15.1.4 Ready in 312ms',
+            '[http] GET / 200 12ms',
+            '[http] GET /api/cart 200 7ms',
+            '[http] POST /api/checkout 200 41ms'
+          ]
+        },
+        {
+          id: 'cnt-go',
+          name: 'dh-go-payment-gateway',
+          project: 'go-payment-gateway',
+          stackKey: 'go',
+          image: 'go-payment:v1.4.2',
+          previousTags: ['go-payment:v1.4.1', 'go-payment:v1.4.0'],
+          status: 'Running',
+          cpuPct: 3.4,
+          ramMb: 28,
+          ramLimitMb: 256,
+          ports: '127.0.0.1:8080->8080/tcp',
+          uptime: 'Up 18 phút',
+          logs: [
+            '[go] Server listening :8080 (distroless)',
+            '[pgx] Pool healthy: 4 idle, 1 active',
+            '[http] POST /v1/payments/intent 201 5.9ms'
+          ]
+        },
+        {
+          id: 'cnt-rust',
+          name: 'dh-rust-realtime-engine',
+          project: 'rust-realtime-engine',
+          stackKey: 'rust',
+          image: 'rust-engine:latest',
+          previousTags: ['rust-engine:v0.9.4', 'rust-engine:v0.9.3'],
+          status: 'Running',
+          cpuPct: 8.5,
+          ramMb: 44,
+          ramLimitMb: 256,
+          ports: '127.0.0.1:9000->9000/tcp',
+          uptime: 'Up 3 giờ (Blue-Green active)',
+          logs: [
+            '[actix] Starting 4 worker threads on 0.0.0.0:9000',
+            '[ws] Active WebSocket clients: 312',
+            '[ws] Heartbeat latency avg: 1.4ms'
+          ]
+        },
+        {
+          id: 'cnt-crm-fe',
+          name: 'dh-crm-fe-angular',
+          project: 'crm-fullstack-monorepo',
+          stackKey: 'spa',
+          image: 'crm-fe:7a20f9c',
+          previousTags: ['crm-fe:6d11a0e'],
+          status: 'Running',
+          cpuPct: 1.2,
+          ramMb: 18,
+          ramLimitMb: 128,
+          ports: 'crm_net:80/tcp',
+          uptime: 'Up 1 giờ',
+          logs: [
+            '[nginx] GET /assets/main-B4k1.js 200',
+            '[nginx] Proxy /api/* -> http://dh-crm-be-go:8080'
+          ]
+        },
+        {
+          id: 'cnt-crm-be',
+          name: 'dh-crm-be-go',
+          project: 'crm-fullstack-monorepo',
+          stackKey: 'go',
+          image: 'crm-be:7a20f9c',
+          previousTags: ['crm-be:6d11a0e'],
+          status: 'Running',
+          cpuPct: 4.1,
+          ramMb: 62,
+          ramLimitMb: 512,
+          ports: 'crm_net:8080/tcp',
+          uptime: 'Up 1 giờ',
+          logs: [
+            '[crm-be] Migrated 14 SQL tables cleanly',
+            '[crm-be] GET /api/customers 200 (9ms)'
+          ]
+        },
+        {
+          id: 'cnt-crm-db',
+          name: 'dh-crm-postgres-16',
+          project: 'crm-fullstack-monorepo',
+          stackKey: 'compose',
+          image: 'postgres:16-alpine',
+          previousTags: ['postgres:16.3-alpine'],
+          status: 'Running',
+          cpuPct: 3.8,
+          ramMb: 400,
+          ramLimitMb: 1024,
+          ports: 'crm_net:5432/tcp (Internal)',
+          uptime: 'Up 1 giờ',
+          logs: [
+            '[pg] checkpoint complete: wrote 18 buffers (0.1%)',
+            '[pg] autovacuum launcher started'
+          ]
+        },
+        {
+          id: 'cnt-react',
+          name: 'dh-react-admin-portal',
+          project: 'react-admin-portal',
+          stackKey: 'spa',
+          image: 'react-admin:91d4e21',
+          previousTags: ['react-admin:82a0b12'],
+          status: 'Stopped',
+          cpuPct: 0,
+          ramMb: 0,
+          ramLimitMb: 128,
+          ports: '127.0.0.1:8088->80/tcp',
+          uptime: 'Exited (0) 2 ngày trước',
+          logs: [
+            '[nginx] graceful shutdown complete',
+            '[docker] Container exited with code 0'
+          ]
+        }
+      ],
+      images: [
+        { id: 'img-next', repoTag: 'nextjs-commerce:sha-8f92a1', stackKey: 'nextjs', sizeMb: 148, inUse: true, dangling: false, created: '4 phút trước', history: ['sha-8f92a1', 'sha-7c10b4', 'sha-60e219'] },
+        { id: 'img-go', repoTag: 'go-payment:v1.4.2', stackKey: 'go', sizeMb: 19, inUse: true, dangling: false, created: '18 phút trước', history: ['v1.4.2', 'v1.4.1', 'v1.4.0'] },
+        { id: 'img-rust', repoTag: 'rust-engine:latest', stackKey: 'rust', sizeMb: 24, inUse: true, dangling: false, created: '3 giờ trước', history: ['latest', 'v0.9.4', 'v0.9.3'] },
+        { id: 'img-pg', repoTag: 'postgres:16-alpine', stackKey: 'compose', sizeMb: 242, inUse: true, dangling: false, created: '6 ngày trước', history: ['16-alpine'] },
+        { id: 'img-dangle-1', repoTag: '<none>:<none>', stackKey: 'auto', note: 'Dangling Next.js build layer', sizeMb: 640, inUse: false, dangling: true, created: '2 giờ trước', history: ['<none>'] },
+        { id: 'img-dangle-2', repoTag: '<none>:<none>', stackKey: 'auto', note: 'Dangling Rust cargo cache layer', sizeMb: 540, inUse: false, dangling: true, created: '1 ngày trước', history: ['<none>'] }
+      ],
+      proxyRoutes: [
+        { id: 'rt-1', domain: 'store.anna.dev', target: 'dh-nextjs-commerce-store:3000', pathRule: '/*', ssl: true, certExp: '84 ngày', protocol: 'HTTP/2 + TLS 1.3' },
+        { id: 'rt-2', domain: 'api.anna.dev', target: 'dh-go-payment-gateway:8080', pathRule: '/*', ssl: true, certExp: '72 ngày', protocol: 'HTTP/2 + TLS 1.3' },
+        { id: 'rt-3', domain: 'ws.anna.dev', target: 'dh-rust-realtime-engine:9000', pathRule: '/ws', ssl: true, certExp: '89 ngày', protocol: 'WSS + TLS 1.3' },
+        { id: 'rt-4', domain: 'crm.anna.dev', target: 'FE :80 & /api/* → BE :8080', pathRule: '/ , /api/*', ssl: true, certExp: '61 ngày', protocol: 'HTTP/2 + TLS 1.3' },
+        { id: 'rt-5', domain: 'admin.anna.dev', target: 'dh-react-admin-portal:80', pathRule: '/*', ssl: false, certExp: 'Chưa cấp', protocol: 'HTTP Only' }
+      ],
+      webhookUrl: 'https://hub.anna.dev/api/webhooks/github/wh_9a81f0c2',
+      wizard: {
+        step: 1,
+        scmMode: 'oauth',
+        oauthRepo: 'anh-tang/nextjs-ai-dashboard',
+        oauthBranch: 'main',
+        autoWebhook: true,
+        patToken: '',
+        patShow: false,
+        patRepoUrl: 'https://github.com/my-org/private-go-api.git',
+        patBranch: 'main',
+        patVerified: false,
+        patChecking: false,
+        patError: '',
+        appName: 'nextjs-ai-dashboard',
+        domain: 'ai.anna.dev',
+        detectMode: 'hybrid',
+        presetSelection: 'auto',
+        autoResolvedPreset: 'nextjs',
+        isScanning: false,
+        detectedFiles: [...AUTO_DETECT_PROFILES.nextjs.files],
+        aiInsight: AUTO_DETECT_PROFILES.nextjs.aiInsight,
+        scanMeta: '99% Match • 85ms (Trees API + AI)',
+        presetKey: 'nextjs',
+        buildCmd: STACK_PRESETS.nextjs.buildCmd,
+        startCmd: STACK_PRESETS.nextjs.startCmd,
+        portMapping: STACK_PRESETS.nextjs.portMapping,
+        envVars: JSON.parse(JSON.stringify(STACK_PRESETS.nextjs.envVars)),
+        deployStatus: 'idle',
+        deployStage: 0,
+        deployLogs: [],
+        deployedOnce: false,
+        deployId: '',
+        serverDockerfile: ''
+      },
+      modal: {
+        open: false,
+        type: null,
+        targetKind: null,
+        targetId: null,
+        logFilter: ''
+      }
+    };
+
+    const isHttpMode = typeof window !== 'undefined' && Boolean(window.location && String(window.location.protocol || '').startsWith('http'));
+    let deployTimers = [];
+    let scanTimer = null;
+    let activeDeploySource = null;
+    let dfSyncTimer = null;
+
+    function canUseBackend() {
+      return typeof window !== 'undefined'
+        && Boolean(window.location && String(window.location.protocol || '').startsWith('http'))
+        && typeof fetch === 'function';
+    }
+
+    async function apiFetch(path, opts = {}) {
+      const normalized = path.startsWith('/api/v1')
+        ? path
+        : `/api/v1${path.startsWith('/') ? path : '/' + path}`;
+      const headers = Object.assign({}, opts.headers || {});
+      if (opts.body !== undefined && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), opts.timeoutMs || 8000) : null;
+      try {
+        const res = await fetch(normalized, {
+          ...opts,
+          headers,
+          signal: controller ? controller.signal : undefined
+        });
+        const text = await res.text();
+        let data = {};
+        if (text) {
+          try { data = JSON.parse(text); } catch { data = { raw: text }; }
+        }
+        if (!res.ok) {
+          throw new Error(data.error || data.message || `HTTP ${res.status}`);
+        }
+        return data;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    function applyOverviewData(data) {
+      if (!data || typeof data !== 'object') return;
+      if (data.vps && typeof data.vps === 'object') {
+        state.vps = Object.assign({}, state.vps, data.vps);
+        if (data.vps.runtimeMode) state.api.runtimeMode = data.vps.runtimeMode;
+      }
+      if (Array.isArray(data.projects)) {
+        const prevMap = new Map(state.projects.map(p => [p.id, p]));
+        state.projects = data.projects.map((p, idx) => {
+          const prev = prevMap.get(p.id);
+          const defaultTrend = p.status === 'Stopped'
+            ? [8, 6, 4, 2, 0, 0, 0, 0, 0]
+            : [14 + (idx % 4) * 3, 18, 16, 22, 24, 21, 27, 29, 32];
+          return Object.assign({}, p, {
+            logs: Array.isArray(p.logs) ? p.logs : [],
+            reqPerSec: p.reqPerSec || (prev && prev.reqPerSec) || (p.status === 'Stopped' ? '0 req/s' : `${180 + (idx % 5) * 90} req/s`),
+            trend: Array.isArray(p.trend) && p.trend.length ? p.trend : ((prev && prev.trend) || defaultTrend)
+          });
+        });
+        if (state.projects.length && !state.projects.some(p => p.id === state.selectedTopologyId)) {
+          state.selectedTopologyId = state.projects[0].id;
+        }
+      }
+      if (Array.isArray(data.containers)) {
+        state.containers = data.containers.map(c => Object.assign({}, c, {
+          previousTags: Array.isArray(c.previousTags) ? c.previousTags : [],
+          logs: Array.isArray(c.logs) ? c.logs : []
+        }));
+      }
+      if (Array.isArray(data.images)) {
+        state.images = data.images.map(img => Object.assign({}, img, {
+          stackKey: img.stackKey || (img.dangling ? 'auto' : inferPresetFromRepoStr(img.repoTag)),
+          history: Array.isArray(img.history) ? img.history : []
+        }));
+      }
+      if (Array.isArray(data.proxyRoutes)) {
+        state.proxyRoutes = data.proxyRoutes;
+      }
+      if (data.webhookUrl) {
+        state.webhookUrl = data.webhookUrl;
+      }
+    }
+
+    async function refreshOverview() {
+      if (!canUseBackend()) return false;
+      try {
+        const overview = await apiFetch('/overview');
+        applyOverviewData(overview);
+        state.api.httpMode = true;
+        state.api.connected = true;
+        state.api.lastError = '';
+        return true;
+      } catch (err) {
+        state.api.lastError = err && err.message ? err.message : 'Backend unreachable';
+        return false;
+      }
+    }
+
+    async function initApp() {
+      const httpActive = canUseBackend();
+      state.api.httpMode = httpActive;
+      if (!httpActive) {
+        state.api.connected = false;
+        state.api.runtimeMode = 'standalone';
+        renderHeader();
+        return;
+      }
+      state.api.connecting = true;
+      renderHeader();
+      try {
+        const [healthRes, overviewRes] = await Promise.allSettled([
+          apiFetch('/health'),
+          apiFetch('/overview')
+        ]);
+        let ok = false;
+        if (overviewRes.status === 'fulfilled' && overviewRes.value) {
+          applyOverviewData(overviewRes.value);
+          ok = true;
+        }
+        if (healthRes.status === 'fulfilled' && healthRes.value) {
+          if (healthRes.value.runtimeMode) state.api.runtimeMode = healthRes.value.runtimeMode;
+          if (healthRes.value.dockerVersion) state.vps.dockerVersion = healthRes.value.dockerVersion;
+          ok = true;
+        }
+        state.api.connected = ok;
+        state.api.connecting = false;
+        renderAll();
+      } catch (err) {
+        state.api.connecting = false;
+        state.api.connected = false;
+        state.api.runtimeMode = 'standalone';
+        state.api.lastError = err && err.message ? err.message : 'Offline';
+        renderHeader();
+      }
+    }
+
+    // =========================================================================
+    // 3. VECTOR ICONS, SPARKLINES, MACOS CHROME & CODE HIGHLIGHT HELPERS
+    // =========================================================================
+    function esc(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function githubIconSvg(cls = 'w-4 h-4') {
+      return `<svg class="${cls}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.22.7-3.9-1.37-3.9-1.37-.53-1.33-1.29-1.69-1.29-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.57-.29-5.27-1.28-5.27-5.72 0-1.26.45-2.3 1.19-3.11-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.19a11 11 0 0 1 5.78 0c2.21-1.5 3.18-1.19 3.18-1.19.63 1.59.23 2.77.11 3.06.74.81 1.19 1.85 1.19 3.11 0 4.45-2.71 5.42-5.29 5.71.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>`;
+    }
+
+    function dockerIconSvg(cls = 'w-4 h-4') {
+      return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="8" width="4" height="4" rx="0.5"/><rect x="8" y="8" width="4" height="4" rx="0.5"/><rect x="13" y="8" width="4" height="4" rx="0.5"/><rect x="8" y="3" width="4" height="4" rx="0.5"/><path d="M2 14h19c0 4.2-3.4 6.5-8.5 6.5C6.5 20.5 2 18.2 2 14z"/></svg>`;
+    }
+
+    function traefikIconSvg(cls = 'w-4 h-4') {
+      return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`;
+    }
+
+    function stackIconHtml(key, size = 'md') {
+      const box = size === 'sm' ? 'w-7 h-7 rounded-lg' : 'w-9 h-9 rounded-xl';
+      const svgCls = size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4';
+      const themes = {
+        auto: {
+          cls: 'bg-gradient-to-br from-violet-500/20 to-sky-500/20 border-violet-500/35 text-violet-500',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.7L18.6 9.6l-4.7 1.9L12 16.2l-1.9-4.7-4.7-1.9 4.7-1.9L12 3z"/><path d="M19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16z"/></svg>`
+        },
+        nextjs: {
+          cls: 'bg-indigo-500/15 text-indigo-500 border-indigo-500/30',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 15.5V8.5l6.5 7.5V8.5"/></svg>`
+        },
+        spa: {
+          cls: 'bg-cyan-500/15 text-cyan-500 border-cyan-500/30',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="2"/><ellipse cx="12" cy="12" rx="9" ry="3.8" transform="rotate(30 12 12)"/><ellipse cx="12" cy="12" rx="9" ry="3.8" transform="rotate(-30 12 12)"/><ellipse cx="12" cy="12" rx="9" ry="3.8" transform="rotate(90 12 12)"/></svg>`
+        },
+        go: {
+          cls: 'bg-sky-500/15 text-sky-500 border-sky-500/30',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+        },
+        rust: {
+          cls: 'bg-amber-500/15 text-amber-500 border-amber-500/30',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2.5M12 19.5V22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2 12h2.5M19.5 12H22M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>`
+        },
+        compose: {
+          cls: 'bg-blue-500/15 text-blue-500 border-blue-500/30',
+          svg: `<svg class="${svgCls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>`
+        }
+      };
+      const t = themes[key] || themes.nextjs;
+      return `<span class="${box} border flex items-center justify-center shrink-0 ${t.cls}">${t.svg}</span>`;
+    }
+
+    function sparklineSvg(points, strokeColor, gradId, heightCls = 'h-8') {
+      const vals = Array.isArray(points) && points.length > 1 ? points : [10, 14, 12, 18, 20];
+      const max = Math.max(...vals, 1);
+      const min = Math.min(...vals, 0);
+      const span = Math.max(max - min, 1);
+      const w = 120;
+      const h = 32;
+      const coords = vals.map((v, i) => {
+        const x = Number(((i / (vals.length - 1)) * w).toFixed(1));
+        const y = Number((h - 4 - ((v - min) / span) * (h - 9)).toFixed(1));
+        return [x, y];
+      });
+      let lineD = `M ${coords[0][0]} ${coords[0][1]}`;
+      for (let i = 1; i < coords.length; i++) {
+        const prev = coords[i - 1];
+        const curr = coords[i];
+        const cx = ((prev[0] + curr[0]) / 2).toFixed(1);
+        lineD += ` C ${cx} ${prev[1]}, ${cx} ${curr[1]}, ${curr[0]} ${curr[1]}`;
+      }
+      const areaD = `${lineD} L ${w} ${h} L 0 ${h} Z`;
+      const last = coords[coords.length - 1];
+      return `
+        <svg viewBox="0 0 120 32" class="w-full ${heightCls} overflow-visible" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="${esc(gradId)}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${esc(strokeColor)}" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="${esc(strokeColor)}" stop-opacity="0.0"/>
+            </linearGradient>
+          </defs>
+          <path d="${areaD}" fill="url(#${esc(gradId)})"/>
+          <path d="${lineD}" fill="none" stroke="${esc(strokeColor)}" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="${last[0]}" cy="${last[1]}" r="2.6" fill="${esc(strokeColor)}"/>
+        </svg>
+      `;
+    }
+
+    function highlightCodeHtml(codeText) {
+      const lines = String(codeText || '').split('\n');
+      return lines.map((raw, idx) => {
+        const num = String(idx + 1).padStart(2, '0');
+        const safe = esc(raw);
+        let formatted = safe;
+        const trimmed = raw.trim();
+        if (trimmed.startsWith('#')) {
+          formatted = `<span class="text-[var(--muted-foreground)] italic">${safe}</span>`;
+        } else {
+          formatted = safe
+            .replace(/^(\s*)(FROM|AS|WORKDIR|COPY|RUN|ENV|EXPOSE|CMD|ENTRYPOINT)\b/g, '$1<span class="text-violet-500 font-semibold">$2</span>')
+            .replace(/\b(AS)\b/g, '<span class="text-violet-500 font-semibold">$1</span>')
+            .replace(/^(\s*)(services|frontend|backend|postgres|networks|volumes|build|image|depends_on|environment|healthcheck|test|interval|restart|labels):/g, '$1<span class="text-indigo-500 font-semibold">$2:</span>')
+            .replace(/(--from=[a-zA-Z0-9_-]+|--no-cache|--locked|--release|-ldflags=&quot;[^&]*&quot;)/g, '<span class="text-sky-500">$1</span>')
+            .replace(/(&quot;[^&]*&quot;)/g, '<span class="text-emerald-500">$1</span>');
+        }
+        return `<div class="flex items-start gap-3 leading-relaxed"><span class="text-[var(--muted-foreground)] select-none w-6 text-right shrink-0">${num}</span><span class="whitespace-pre">${formatted || ' '}</span></div>`;
+      }).join('');
+    }
+
+    function highlightTerminalLineHtml(raw) {
+      const safe = esc(raw);
+      if (raw.trim().startsWith('$')) {
+        return `<span class="text-sky-500 font-semibold">${safe}</span>`;
+      }
+      if (raw.includes('✓') || raw.includes('200 OK') || raw.includes('thành công') || raw.includes('hoàn tất') || raw.includes('sẵn sàng')) {
+        return `<span class="text-emerald-500">${safe}</span>`;
+      }
+      return safe.replace(/(\[[1-5]\/5\])/g, '<span class="text-indigo-500 font-semibold">$1</span>');
+    }
+
+    function macWindowShell(titleHtml, rightHtml, bodyHtml, bodyId = '', bodyMaxCls = 'max-h-[300px]') {
+      return `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--sidebar)] overflow-hidden shadow-sm">
+          <div class="px-3.5 py-2 bg-[var(--content)] border-b border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <div class="flex items-center gap-1.5 shrink-0">
+                <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
+              </div>
+              ${titleHtml}
+            </div>
+            <div class="flex items-center gap-2">${rightHtml}</div>
+          </div>
+          <div ${bodyId ? `id="${bodyId}"` : ''} class="p-3 font-mono text-xs overflow-x-auto overflow-y-auto thin-scroll ${bodyMaxCls} text-[var(--foreground)]">
+            ${bodyHtml}
+          </div>
+        </div>
+      `;
+    }
+
+    function showToast(message, tone = 'info') {
+      const stack = document.getElementById('toastStack');
+      if (!stack) return;
+      const toneClass = tone === 'success'
+        ? 'border-emerald-500/40 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-emerald-500/15'
+        : tone === 'warn'
+        ? 'border-amber-500/40 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-amber-500/15'
+        : tone === 'error'
+        ? 'border-rose-500/40 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-rose-500/15'
+        : 'border-indigo-500/35 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-indigo-500/15';
+      const dotColor = tone === 'success'
+        ? 'bg-emerald-500'
+        : tone === 'warn'
+        ? 'bg-amber-500'
+        : tone === 'error'
+        ? 'bg-rose-500'
+        : 'bg-indigo-500';
+      const el = document.createElement('div');
+      el.className = `pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border shadow-lg text-xs font-medium transition-all ${toneClass}`;
+      el.innerHTML = `<span class="w-2 h-2 rounded-full ${dotColor} shrink-0"></span><span>${esc(message)}</span>`;
+      stack.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(6px)';
+        setTimeout(() => el.remove(), 220);
+      }, 2800);
+    }
+
+    function statusBadgeHtml(status) {
+      if (status === 'Running') {
+        return `<span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-medium shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Running</span>`;
+      }
+      if (status === 'Building...' || status === 'Restarting...') {
+        return `<span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-500 border border-amber-500/30 ring-2 ring-amber-500/15 font-medium shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 pulse-dot"></span>${esc(status)}</span>`;
+      }
+      return `<span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-500 border border-rose-500/30 ring-2 ring-rose-500/15 font-medium shrink-0"><span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>Stopped</span>`;
+    }
+
+    function generateDockerfilePreview() {
+      const w = state.wizard;
+      if (w.serverDockerfile && w.serverDockerfile.trim()) {
+        return w.serverDockerfile;
+      }
+      const isHybrid = w.detectMode === 'hybrid';
+      const modeTag = isHybrid ? 'Hybrid File + AI Assist' : 'File Heuristic Rule-based';
+      const portNum = (w.portMapping.match(/\d+/) || ['3000'])[0];
+      const envLines = w.envVars
+        .filter(e => e.key.trim())
+        .slice(0, 4)
+        .map(e => `ENV ${e.key.trim()}="${e.secret ? '***' : e.value}"`)
+        .join('\n');
+
+      if (w.presetKey === 'nextjs') {
+        const aiDeps = isHybrid ? '\n# [AI Assist] Native deps cho Prisma & Sharp\nRUN apk add --no-cache openssl libc6-compat' : '';
+        return `# Auto-generated by DeploymentHub (${modeTag} — Next.js Standalone)
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN ${w.buildCmd}
+
+FROM node:20-alpine AS runner
+WORKDIR /app${aiDeps}
+${envLines || 'ENV NODE_ENV=production'}
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+EXPOSE ${portNum}
+CMD ["node", "server.js"]`;
+      }
+
+      if (w.presetKey === 'spa') {
+        const aiNginx = isHybrid ? '\n# [AI Assist] Gzip & SPA fallback try_files $uri /index.html\nRUN apk add --no-cache brotli' : '';
+        return `# Auto-generated by DeploymentHub (${modeTag} — SPA Static + Nginx)
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN ${w.buildCmd}
+
+FROM nginx:1.27-alpine${aiNginx}
+${envLines || 'ENV NODE_ENV=production'}
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE ${portNum}
+CMD ["nginx", "-g", "daemon off;"]`;
+      }
+
+      if (w.presetKey === 'go') {
+        const aiGo = isHybrid ? '\n# [AI Assist] Ca-certificates & timezone data cho outbound HTTPS\nCOPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/' : '';
+        return `# Auto-generated by DeploymentHub (${modeTag} — Go Static Binary)
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+RUN apk add --no-cache ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN ${w.buildCmd}
+
+FROM gcr.io/distroless/static-debian12${aiGo}
+${envLines || 'ENV PORT=8080'}
+COPY --from=builder /out/server /server
+EXPOSE ${portNum}
+ENTRYPOINT ["${w.startCmd}"]`;
+      }
+
+      if (w.presetKey === 'rust') {
+        const aiRust = isHybrid ? '\n# [AI Assist] Native TLS headers (pkg-config + openssl-dev)\nRUN apk add --no-cache musl-dev pkgconfig openssl-dev' : '\nRUN apk add --no-cache musl-dev';
+        return `# Auto-generated by DeploymentHub (${modeTag} — Rust Release Binary)
+FROM rust:1.80-alpine AS builder
+WORKDIR /app${aiRust}
+COPY . .
+RUN ${w.buildCmd}
+
+FROM alpine:3.20
+${envLines || 'ENV RUST_LOG=info'}
+COPY --from=builder /app/target/release/api-engine /usr/local/bin/api-engine
+EXPOSE ${portNum}
+CMD ["api-engine"]`;
+      }
+
+      const aiComposeHealth = isHybrid
+        ? `\n    healthcheck:\n      test: ["CMD-SHELL", "pg_isready -U postgres"]\n      interval: 5s\n    restart: unless-stopped`
+        : '';
+      return `# Auto-generated by DeploymentHub (${modeTag} — Full-stack Compose)
+services:
+  frontend:
+    build: ./apps/web
+    networks: [internal-net]
+    labels: ["traefik.http.routers.${w.appName}-fe.rule=Host(\`${w.domain}\`)"]
+
+  backend:
+    build: ./apps/api
+    depends_on: [postgres]
+    environment:
+${w.envVars.filter(e => e.key.trim()).map(e => `      - ${e.key.trim()}=${e.secret ? '***' : e.value}`).join('\n') || '      - PORT=8080'}
+    networks: [internal-net]
+    labels: ["traefik.http.routers.${w.appName}-be.rule=Host(\`${w.domain}\`) && PathPrefix(\`/api\`)"]
+
+  postgres:
+    image: postgres:16-alpine
+    volumes: ["pg_data:/var/lib/postgresql/data"]${aiComposeHealth}
+    networks: [internal-net]
+
+networks:
+  internal-net:
+volumes:
+  pg_data:`;
+    }
+
+    function syncVpsRamFromContainers() {
+      const totalMb = state.containers
+        .filter(c => c.status === 'Running')
+        .reduce((acc, c) => acc + c.ramMb, 0);
+      state.vps.ramUsed = Number((3.04 + totalMb / 1024).toFixed(1));
+    }
+
+    // =========================================================================
+    // 4. VIEWPORT & NAVIGATION
+    // =========================================================================
+    function setViewport(mode) {
+      state.viewport = mode;
+      renderAll();
+    }
+
+    function setTab(tab) {
+      state.activeTab = tab;
+      renderWorkspace();
+      renderHeader();
+    }
+
+    function setDashboardView(view) {
+      state.dashboardView = view;
+      renderMainView();
+    }
+
+    function setDockerSubTab(sub) {
+      state.dockerSubTab = sub;
+      renderMainView();
+    }
+
+    // =========================================================================
+    // 5. THEME ENGINE, RENDER HEADER & WORKSPACE SHELL
+    // =========================================================================
+    function updateThemeToggleBtn() {
+      const btn = document.getElementById('btnThemeToggle');
+      if (!btn) return;
+      const isDark = state.theme === 'dark';
+      btn.innerHTML = isDark
+        ? `<svg class="w-3.5 h-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Dark</span>`
+        : `<svg class="w-3.5 h-3.5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg><span>Light</span>`;
+    }
+
+    function applyTheme(theme) {
+      const resolved = theme === 'light' ? 'light' : 'dark';
+      state.theme = resolved;
+      const palette = THEME_PALETTES[resolved];
+      if (typeof document !== 'undefined' && document.documentElement) {
+        const rootEl = document.documentElement;
+        if (rootEl.style && typeof rootEl.style.setProperty === 'function') {
+          Object.entries(palette).forEach(([prop, val]) => {
+            rootEl.style.setProperty(prop, val);
+          });
+        }
+        if (rootEl.classList) {
+          rootEl.classList.remove('dark', 'light');
+          rootEl.classList.add(resolved);
+        }
+      }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('dh_theme', resolved);
+        }
+      } catch {}
+      updateThemeToggleBtn();
+    }
+
+    function toggleTheme() {
+      const next = state.theme === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      showToast(next === 'dark' ? 'Đã bật Dark Mode' : 'Đã chuyển sang Light Mode', 'info');
+    }
+
+    applyTheme(state.theme);
+
+    function renderHeader() {
+      updateThemeToggleBtn();
+      const sub = document.getElementById('headerSubtitle');
+      if (sub) {
+        sub.textContent = state.api.connected
+          ? 'Go Control Plane API • Git-to-Docker E2E • Hybrid File + AI Auto-Detect'
+          : 'Git-to-Docker E2E • Hybrid File + AI Auto-Detect';
+      }
+
+      const pills = document.getElementById('vpsHeaderPills');
+      if (pills) {
+        const v = state.vps;
+        let apiBadgeHtml = '';
+        if (!canUseBackend()) {
+          apiBadgeHtml = `
+            <span id="apiModeBadge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-medium">
+              <span class="w-2 h-2 rounded-full bg-[var(--muted-foreground)]"></span>
+              <span>Standalone Mockup</span>
+            </span>
+          `;
+        } else if (state.api.connected) {
+          const modeLabel = state.api.runtimeMode === 'docker' ? 'API Online (Docker Engine)' : 'API Online (Go Simulator)';
+          apiBadgeHtml = `
+            <span id="apiModeBadge" title="Go Control Plane API" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/15 border border-indigo-500/30 ring-2 ring-indigo-500/15 text-indigo-500 font-semibold">
+              <span class="w-2 h-2 rounded-full bg-indigo-500 pulse-dot"></span>
+              <span>${esc(modeLabel)}</span>
+            </span>
+          `;
+        } else {
+          apiBadgeHtml = `
+            <span id="apiModeBadge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-500 font-medium">
+              <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+              <span>${state.api.connecting ? 'Connecting Go API...' : 'Standalone Mockup (Offline)'}</span>
+            </span>
+          `;
+        }
+
+        pills.innerHTML = `
+          ${apiBadgeHtml}
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 ring-2 ring-emerald-500/15 text-emerald-500 font-medium">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span>${esc(v.host)}</span>
+          </span>
+          <span class="px-2.5 py-1 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-mono">CPU ${v.cpu}%</span>
+          <span class="px-2.5 py-1 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-mono">RAM ${v.ramUsed}/${v.ramTotal}GB</span>
+          <span class="px-2.5 py-1 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-mono">Disk ${v.diskPct}%</span>
+          <span class="px-2.5 py-1 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-mono hidden md:inline-flex items-center gap-1.5">${dockerIconSvg('w-3.5 h-3.5 text-sky-500')}<span>${esc(v.dockerVersion)}</span></span>
+        `;
+      }
+
+      const btnD = document.getElementById('btnDesktopView');
+      const btnM = document.getElementById('btnMobileView');
+      if (btnD && btnM) {
+        const activeCls = 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/25 transition';
+        const idleCls = 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--accent)] transition';
+        btnD.className = state.viewport === 'desktop' ? activeCls : idleCls;
+        btnM.className = state.viewport === 'mobile' ? activeCls : idleCls;
+      }
+    }
+
+    function navItemsMeta() {
+      const runningProjects = state.projects.filter(p => p.status === 'Running').length;
+      const runningCnts = state.containers.filter(c => c.status === 'Running').length;
+      return [
+        { id: 'dashboard', label: 'Tổng quan & Projects', shortLabel: 'Tổng quan', badge: `${runningProjects}/${state.projects.length}`, icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>` },
+        { id: 'wizard', label: '+ Deploy Project Mới', shortLabel: 'Deploy', badge: 'AI', icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.7L18.6 9.6l-4.7 1.9L12 16.2l-1.9-4.7-4.7-1.9 4.7-1.9L12 3z"/></svg>` },
+        { id: 'docker', label: 'Quản lý Docker', shortLabel: 'Docker', badge: `${runningCnts}`, icon: dockerIconSvg('w-4 h-4 shrink-0') },
+        { id: 'proxy', label: 'VPS & Reverse Proxy', shortLabel: 'VPS/SSL', badge: `${state.proxyRoutes.filter(r => r.ssl).length} SSL`, icon: traefikIconSvg('w-4 h-4 shrink-0') }
+      ];
+    }
+
+    function renderWorkspace() {
+      const root = document.getElementById('appWorkspace');
+      if (!root) return;
+      const prevMain = document.getElementById('mainViewContainer');
+      const prevScroll = prevMain ? prevMain.scrollTop : 0;
+      const navs = navItemsMeta();
+
+      if (state.viewport === 'desktop') {
+        root.innerHTML = `
+          <div class="max-w-[1480px] mx-auto flex min-h-[calc(100vh-61px)] relative">
+            <!-- Left Sidebar -->
+            <aside class="w-64 shrink-0 bg-[var(--sidebar)] border-r border-[var(--border)] p-4 flex flex-col justify-between gap-4">
+              <div class="space-y-4">
+                <!-- Workspace GitHub OAuth Card -->
+                <div class="px-3 py-2.5 rounded-2xl bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent border border-indigo-500/25 flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2.5 min-w-0">
+                    <span class="w-8 h-8 rounded-xl bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] flex items-center justify-center shrink-0">
+                      ${githubIconSvg('w-4 h-4')}
+                    </span>
+                    <div class="min-w-0">
+                      <div class="text-xs font-semibold text-[var(--foreground)] truncate">@anh-tang</div>
+                      <div class="text-xs text-[var(--muted-foreground)] truncate">production-sg</div>
+                    </div>
+                  </div>
+                  <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 font-medium">OAuth</span>
+                </div>
+
+                <!-- Navigation -->
+                <nav class="space-y-1.5">
+                  ${navs.map(n => {
+                    const active = state.activeTab === n.id;
+                    const cls = active
+                      ? 'w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/25 transition'
+                      : 'w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl text-xs font-medium text-[var(--foreground)] hover:bg-[var(--accent)] transition';
+                    const badgeCls = active
+                      ? 'text-xs px-2 py-0.5 rounded-full bg-[var(--background)]/20 text-white font-mono'
+                      : 'text-xs px-2 py-0.5 rounded-full bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] font-mono';
+                    return `
+                      <button type="button" onclick="setTab('${n.id}')" class="${cls}">
+                        <span class="flex items-center gap-2.5 truncate">${n.icon}<span class="truncate">${esc(n.label)}</span></span>
+                        <span class="${badgeCls}">${esc(n.badge)}</span>
+                      </button>
+                    `;
+                  }).join('')}
+                </nav>
+              </div>
+
+              <!-- Sidebar VPS Diagnostics Card -->
+              <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-3.5 space-y-2.5">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="font-semibold text-[var(--foreground)]">System Health</span>
+                  <span class="inline-flex items-center gap-1 text-emerald-500 font-medium"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Optimal</span>
+                </div>
+                <div class="space-y-1.5 text-xs">
+                  <div class="flex justify-between text-[var(--muted-foreground)]">
+                    <span>Traefik Proxy v3.0</span>
+                    <span class="text-emerald-500 font-medium">TLS 1.3</span>
+                  </div>
+                  <div class="flex justify-between text-[var(--muted-foreground)]">
+                    <span>Auto Let's Encrypt</span>
+                    <span class="text-[var(--foreground)] font-mono">${state.proxyRoutes.filter(r => r.ssl).length}/${state.proxyRoutes.length}</span>
+                  </div>
+                  <div class="flex justify-between text-[var(--muted-foreground)]">
+                    <span>Dangling Images</span>
+                    <span class="text-amber-500 font-mono">${state.images.filter(i => i.dangling).length} (${state.images.filter(i => i.dangling).reduce((s,i)=>s+i.sizeMb,0)} MB)</span>
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <!-- Desktop Main Panel -->
+            <main class="flex-1 bg-[var(--background)] p-6 overflow-x-hidden">
+              <div id="mainViewContainer" class="max-w-6xl mx-auto space-y-5"></div>
+            </main>
+          </div>
+          <div id="modalRoot"></div>
+        `;
+      } else {
+        const activeMeta = navs.find(n => n.id === state.activeTab) || navs[0];
+        root.innerHTML = `
+          <div class="min-h-[calc(100vh-61px)] bg-[var(--content)] py-5 px-3 flex flex-col items-center justify-start dot-canvas">
+            <div class="mb-3 flex items-center gap-2 text-xs text-[var(--muted-foreground)] bg-[var(--card)] px-3 py-1 rounded-full border border-[var(--border)] shadow-sm">
+              <span class="font-mono font-semibold text-indigo-500">iPhone 16 Pro • 390×780</span>
+              <span>One-Hand Mobile Ops Mode</span>
+            </div>
+
+            <!-- iPhone 16 Pro Outer Bezel -->
+            <div id="phoneFrame" class="phone-frame rounded-[46px] p-2 bg-[var(--sidebar)] border-2 border-[var(--border)] shadow-2xl flex flex-col relative shrink-0">
+              <!-- Inner Screen -->
+              <div class="flex-1 min-w-0 w-full rounded-[38px] bg-[var(--background)] border border-[var(--border)] flex flex-col overflow-hidden relative">
+                <!-- Dynamic Island + iOS Status Bar -->
+                <div class="shrink-0 bg-[var(--sidebar)] border-b border-[var(--border)] px-4 pt-2.5 pb-2.5 space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="font-mono font-semibold text-[var(--foreground)] w-12">09:41</span>
+                    <!-- Dynamic Island Pill -->
+                    <div class="w-28 h-6 rounded-full bg-[var(--background)] border border-[var(--border)] flex items-center justify-between px-2.5 shadow-inner">
+                      <span class="w-2 h-2 rounded-full bg-indigo-500/70"></span>
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 pulse-dot"></span>
+                    </div>
+                    <!-- Signal / Wi-Fi / Battery -->
+                    <div class="flex items-center gap-1.5 text-[var(--foreground)] w-12 justify-end">
+                      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="2" y="14" width="3" height="6" rx="0.5"/><rect x="7" y="10" width="3" height="10" rx="0.5"/><rect x="12" y="6" width="3" height="14" rx="0.5"/><rect x="17" y="3" width="3" height="17" rx="0.5"/></svg>
+                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="17" height="10" rx="2"/><line x1="21" y1="10" x2="21" y2="14"/><rect x="4.5" y="9.5" width="11" height="5" rx="0.8" fill="currentColor"/></svg>
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="font-semibold text-sm text-[var(--foreground)] truncate">${esc(activeMeta.label)}</div>
+                    <span class="text-xs font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+                      ${state.vps.host} • ${state.vps.cpu}%
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Mobile Scrollable Body -->
+                <div id="mainViewContainer" class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden thin-scroll p-3.5 space-y-3 bg-[var(--background)]"></div>
+
+                <!-- Floating Glassmorphic Bottom Navigation Bar -->
+                <div class="shrink-0 px-3 pb-3 pt-1.5 bg-[var(--background)]/80 backdrop-blur-sm">
+                  <nav class="rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 backdrop-blur-md shadow-lg grid grid-cols-4 gap-1 p-1.5">
+                    ${navs.map(n => {
+                      const active = state.activeTab === n.id;
+                      const cls = active
+                        ? 'flex flex-col items-center justify-center gap-0.5 py-1.5 px-1 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/30 text-xs font-semibold transition'
+                        : 'flex flex-col items-center justify-center gap-0.5 py-1.5 px-1 rounded-xl text-[var(--muted-foreground)] hover:bg-[var(--accent)] text-xs font-medium transition';
+                      return `
+                        <button type="button" onclick="setTab('${n.id}')" class="${cls}">
+                          ${n.icon}
+                          <span class="truncate max-w-full">${esc(n.shortLabel)}</span>
+                        </button>
+                      `;
+                    }).join('')}
+                  </nav>
+                </div>
+
+                <!-- Modal Inside Phone Screen -->
+                <div id="modalRoot"></div>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      renderMainView();
+      renderModal();
+      const nextMain = document.getElementById('mainViewContainer');
+      if (nextMain && prevScroll) nextMain.scrollTop = prevScroll;
+    }
+
+    function renderMainView() {
+      const container = document.getElementById('mainViewContainer');
+      if (!container) return;
+      if (state.activeTab === 'dashboard') renderDashboard(container);
+      else if (state.activeTab === 'wizard') renderWizard(container);
+      else if (state.activeTab === 'docker') renderDocker(container);
+      else if (state.activeTab === 'proxy') renderProxy(container);
+
+      if (state.activeTab === 'dashboard' && state.dashboardView === 'topology' && state.viewport !== 'mobile') {
+        const scheduleWires = () => drawTopologyWires();
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(scheduleWires);
+        setTimeout(scheduleWires, 60);
+      }
+    }
+
+    // =========================================================================
+    // 6. TAB 1: DASHBOARD (KPI SPARKLINES + GRID VIEW / TOPOLOGY GRAPH)
+    // =========================================================================
+    function getFilteredProjects() {
+      const q = state.searchQuery.trim().toLowerCase();
+      return state.projects.filter(p => {
+        const matchCat = state.stackFilter === 'Tất cả' || p.category === state.stackFilter;
+        const matchQ = !q ||
+          p.name.toLowerCase().includes(q) ||
+          p.domain.toLowerCase().includes(q) ||
+          p.stack.toLowerCase().includes(q) ||
+          p.repo.toLowerCase().includes(q);
+        return matchCat && matchQ;
+      });
+    }
+
+    function renderDashboard(container) {
+      const isMob = state.viewport === 'mobile';
+      const runningCount = state.projects.filter(p => p.status === 'Running').length;
+      const buildingCount = state.projects.filter(p => p.status === 'Building...').length;
+      const filterOpts = ['Tất cả', 'Frontend', 'Backend API', 'Full-stack Compose'];
+
+      container.innerHTML = `
+        <!-- Top Title + View Switcher + Gradient CTA -->
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 class="text-base font-semibold text-[var(--foreground)]">Tổng quan &amp; Projects</h1>
+            <p class="text-xs text-[var(--muted-foreground)]">Telemetry trực quan, sơ đồ Service Topology và thao tác deploy tức thì.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- Grid View vs Topology Graph Switcher -->
+            <div class="inline-flex items-center gap-1 p-1 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+              <button type="button" onclick="setDashboardView('grid')" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold transition ${state.dashboardView === 'grid' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
+                Grid View
+              </button>
+              <button type="button" onclick="setDashboardView('topology')" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold transition ${state.dashboardView === 'topology' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
+                Topology Graph
+              </button>
+            </div>
+            <button type="button" onclick="setTab('wizard')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 transition">
+              <span>+ Deploy Project Mới</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 4 KPI Cards with SVG Area Sparklines -->
+        <div class="grid ${isMob ? 'grid-cols-2 gap-2.5' : 'grid-cols-4 gap-3'}">
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-2 shadow-sm">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[var(--muted-foreground)] font-medium">CPU Load</span>
+              <span class="text-sky-500 font-mono font-semibold">${state.vps.cpu}%</span>
+            </div>
+            ${sparklineSvg([16, 19, 17, 23, 28, 21, 26, 22, state.vps.cpu], '#0ea5e9', 'kpiCpuGrad')}
+            <div class="text-xs text-[var(--muted-foreground)] font-mono">4 vCPU • Peak 41%</div>
+          </div>
+
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-2 shadow-sm">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[var(--muted-foreground)] font-medium">Memory Curve</span>
+              <span class="text-violet-500 font-mono font-semibold">${state.vps.ramUsed}/${state.vps.ramTotal}G</span>
+            </div>
+            ${sparklineSvg([3.1, 3.3, 3.4, 3.6, 3.5, 3.7, 3.9, 3.8, state.vps.ramUsed], '#8b5cf6', 'kpiRamGrad')}
+            <div class="text-xs text-[var(--muted-foreground)] font-mono">OOM Guard: 85% cap</div>
+          </div>
+
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-2 shadow-sm">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[var(--muted-foreground)] font-medium">Build Velocity</span>
+              <span class="text-emerald-500 font-mono font-semibold">${runningCount}/${state.projects.length} Up</span>
+            </div>
+            ${sparklineSvg([58, 52, 49, 44, 42, 39, 41, 36, 38], '#10b981', 'kpiBuildGrad')}
+            <div class="text-xs text-[var(--muted-foreground)] font-mono">${buildingCount ? `${buildingCount} đang build` : 'Avg 38s • BuildKit'}</div>
+          </div>
+
+          <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-3.5 space-y-2 shadow-sm">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[var(--foreground)] font-medium">HTTPS Traffic</span>
+              <span class="text-indigo-500 font-mono font-semibold">1.4k req/s</span>
+            </div>
+            ${sparklineSvg([0.8, 0.9, 1.1, 1.0, 1.25, 1.18, 1.32, 1.36, 1.4], '#6366f1', 'kpiTrafficGrad')}
+            <div class="text-xs text-emerald-500 font-mono">${state.proxyRoutes.filter(r=>r.ssl).length}/${state.proxyRoutes.length} TLS 1.3 SSL</div>
+          </div>
+        </div>
+
+        ${state.dashboardView === 'topology' ? renderTopologyGraph(isMob) : `
+          <!-- Search & Filter Bar -->
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2.5 shadow-sm">
+            <div class="flex ${isMob ? 'flex-col' : 'flex-row items-center justify-between'} gap-2.5">
+              <div class="relative flex-1 w-full">
+                <input id="dashSearchInput" type="text" value="${esc(state.searchQuery)}" oninput="onDashSearch(this.value)" placeholder="Tìm tên project, domain (store.anna.dev), stack..." class="w-full pl-8 pr-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-indigo-500" />
+                <svg class="w-3.5 h-3.5 text-[var(--muted-foreground)] absolute left-2.5 top-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5">
+                ${filterOpts.map(opt => {
+                  const active = state.stackFilter === opt;
+                  return `<button type="button" onclick="setStackFilter('${opt}')" class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition ${active ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]'}">${esc(opt)}</button>`;
+                }).join('')}
+              </div>
+            </div>
+          </div>
+
+          <!-- Project Cards Grid -->
+          <div id="projectGrid" class="grid ${isMob ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4'}"></div>
+        `}
+      `;
+
+      if (state.dashboardView === 'grid') renderProjectGrid();
+    }
+
+    function selectTopologyNode(projectId) {
+      state.selectedTopologyId = projectId;
+      renderMainView();
+    }
+
+    function drawTopologyWires() {
+      const canvas = document.getElementById('topologyCanvas');
+      const svg = document.getElementById('topologySvg');
+      const gh = document.getElementById('topoNodeGithub');
+      const tr = document.getElementById('topoNodeTraefik');
+      if (!canvas || !svg || !gh || !tr || typeof canvas.getBoundingClientRect !== 'function') return;
+
+      const cRect = canvas.getBoundingClientRect();
+      const W = Math.max(1, Math.round(canvas.scrollWidth || cRect.width));
+      const H = Math.max(1, Math.round(canvas.scrollHeight || cRect.height));
+      if (W <= 1 || H <= 1) return;
+
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('width', String(W));
+      svg.setAttribute('height', String(H));
+
+      const relLeft = (r) => Number((r.left - cRect.left).toFixed(1));
+      const relRight = (r) => Number((r.right - cRect.left).toFixed(1));
+      const relMidY = (r) => Number((r.top + r.height / 2 - cRect.top).toFixed(1));
+
+      const bezier = (x1, y1, x2, y2, stroke, width, dashed, opacity) => {
+        const cx = Number(((x1 + x2) / 2).toFixed(1));
+        const d = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+        return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="${width}" stroke-linecap="round"${dashed ? ' class="dash-flow"' : ''} stroke-opacity="${opacity}"/>`;
+      };
+
+      const ghR = gh.getBoundingClientRect();
+      const trR = tr.getBoundingClientRect();
+      let paths = bezier(relRight(ghR), relMidY(ghR), relLeft(trR), relMidY(trR), '#6366f1', '2.2', true, '0.85');
+
+      const services = canvas.querySelectorAll('[data-topo-service]');
+      services.forEach(card => {
+        const pid = card.getAttribute('data-topo-service');
+        const proj = state.projects.find(p => p.id === pid);
+        const isSel = state.selectedTopologyId === pid;
+        const isStopped = proj && proj.status === 'Stopped';
+        const stroke = isStopped ? '#f43f5e' : isSel ? '#6366f1' : '#0ea5e9';
+        const width = isSel ? '2.6' : '1.8';
+        const op = isSel ? '0.95' : '0.6';
+        const sR = card.getBoundingClientRect();
+        paths += bezier(relRight(trR), relMidY(trR), relLeft(sR), relMidY(sR), stroke, width, !isStopped, op);
+      });
+
+      const pg = document.getElementById('topoNodePostgres');
+      if (pg) {
+        const crmCard = canvas.querySelector('[data-topo-service="crm-fullstack-monorepo"]')
+          || Array.from(services).find(el => {
+            const p = state.projects.find(item => item.id === el.getAttribute('data-topo-service'));
+            return p && p.stackKey === 'compose';
+          });
+        if (crmCard) {
+          const cR = crmCard.getBoundingClientRect();
+          const pR = pg.getBoundingClientRect();
+          paths += bezier(relRight(cR), relMidY(cR), relLeft(pR), relMidY(pR), '#10b981', '2.2', true, '0.9');
+        }
+      }
+
+      svg.innerHTML = paths;
+    }
+
+    let topoResizeTimer = null;
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', () => {
+        if (topoResizeTimer) clearTimeout(topoResizeTimer);
+        topoResizeTimer = setTimeout(() => {
+          if (document.getElementById('topologyCanvas')) drawTopologyWires();
+        }, 60);
+      });
+    }
+
+    function renderTopologyGraph(isMob) {
+      const selected = state.projects.find(p => p.id === state.selectedTopologyId) || state.projects[0];
+      const topProjects = state.projects.slice(0, 5);
+      const crmTarget = state.projects.find(p => p.id === 'crm-fullstack-monorepo' || p.stackKey === 'compose') || selected;
+      const isPgSelected = Boolean(crmTarget && selected && selected.id === crmTarget.id);
+
+      return `
+        <div class="space-y-4">
+          <div class="rounded-2xl border border-indigo-500/25 bg-[var(--content)] dot-canvas p-4 overflow-hidden shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-indigo-500 pulse-dot"></span>
+                <span class="text-xs font-semibold text-[var(--foreground)]">Railway-Style Live Service Topology</span>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)]">Click node để inspect</span>
+              </div>
+              <span class="text-xs font-mono text-emerald-500">Internal Bridge: dh-net • TLS 1.3 Active</span>
+            </div>
+
+            ${isMob ? `
+              <!-- Compact Vertical Mobile Topology Flow -->
+              <div class="space-y-2.5">
+                <div class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-2.5 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="w-7 h-7 rounded-lg bg-[var(--content)] border border-[var(--border)] flex items-center justify-center">${githubIconSvg('w-4 h-4')}</span>
+                    <div><div class="text-xs font-semibold">GitHub SCM</div><div class="text-xs text-[var(--muted-foreground)]">@anh-tang • Webhook</div></div>
+                  </div>
+                  <span class="text-xs font-mono text-emerald-500">Sync ON</span>
+                </div>
+                <div class="flex justify-center"><svg class="w-4 h-5 text-indigo-500" viewBox="0 0 16 20"><line x1="8" y1="0" x2="8" y2="20" stroke="currentColor" stroke-width="2" class="dash-flow"/></svg></div>
+                <div class="rounded-xl border border-indigo-500/35 bg-gradient-to-br from-indigo-500/15 to-sky-500/5 p-2.5 flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="w-7 h-7 rounded-lg bg-indigo-500/20 text-indigo-500 flex items-center justify-center">${traefikIconSvg('w-4 h-4')}</span>
+                    <div><div class="text-xs font-semibold">Traefik Edge Proxy</div><div class="text-xs text-[var(--muted-foreground)]">:443 Auto-SSL • 1.4k req/s</div></div>
+                  </div>
+                  <span class="text-xs font-mono text-indigo-500">v3.0</span>
+                </div>
+                <div class="flex justify-center"><svg class="w-4 h-5 text-sky-500" viewBox="0 0 16 20"><line x1="8" y1="0" x2="8" y2="20" stroke="currentColor" stroke-width="2" class="dash-flow"/></svg></div>
+                <div class="space-y-2">
+                  ${topProjects.map(p => {
+                    const isSel = selected && selected.id === p.id;
+                    return `
+                      <button type="button" onclick="selectTopologyNode('${esc(p.id)}')" class="w-full text-left rounded-xl border p-2.5 flex items-center justify-between gap-2 transition ${isSel ? 'border-indigo-500 bg-gradient-to-br from-indigo-500/15 to-sky-500/5 ring-2 ring-indigo-500/20' : 'border-[var(--border)] bg-[var(--card)]'}">
+                        <div class="flex items-center gap-2 min-w-0">
+                          ${stackIconHtml(p.stackKey, 'sm')}
+                          <div class="min-w-0">
+                            <div class="text-xs font-semibold text-[var(--foreground)] truncate">${esc(p.name)}</div>
+                            <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">${esc(p.domain)} :${esc(p.port)}</div>
+                          </div>
+                        </div>
+                        ${statusBadgeHtml(p.status)}
+                      </button>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            ` : `
+              <!-- Desktop Interactive 4-Column Topology Canvas -->
+              <div class="overflow-x-auto thin-scroll pb-1">
+                <div id="topologyCanvas" class="relative min-w-[780px] w-full min-h-[360px] flex items-center justify-between gap-6 px-3 py-3">
+                  <!-- Dynamic DOM-Measured Bezier Wire Overlay -->
+                  <svg id="topologySvg" class="absolute inset-0 w-full h-full pointer-events-none z-0"></svg>
+
+                  <!-- Col 1: GitHub SCM Node -->
+                  <div id="topoNodeGithub" class="relative z-10 w-44 shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 shadow-md space-y-2">
+                    <div class="flex items-center gap-2.5">
+                      <span class="w-9 h-9 rounded-xl bg-[var(--content)] border border-[var(--border)] flex items-center justify-center shrink-0">${githubIconSvg('w-5 h-5')}</span>
+                      <div class="min-w-0">
+                        <div class="text-xs font-semibold text-[var(--foreground)] truncate">GitHub SCM</div>
+                        <div class="text-xs text-[var(--muted-foreground)] font-mono truncate">@anh-tang</div>
+                      </div>
+                    </div>
+                    <div class="text-xs px-2 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)] font-mono text-emerald-500 truncate">OAuth + PAT • Hook</div>
+                  </div>
+
+                  <!-- Col 2: Traefik Proxy Node -->
+                  <div id="topoNodeTraefik" class="relative z-10 w-48 shrink-0 rounded-2xl border border-indigo-500/40 bg-gradient-to-br from-indigo-500/15 via-violet-500/10 to-[var(--card)] p-3.5 shadow-md space-y-2">
+                    <div class="flex items-center gap-2.5">
+                      <span class="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-500 text-white flex items-center justify-center shadow-sm shrink-0">${traefikIconSvg('w-5 h-5')}</span>
+                      <div class="min-w-0">
+                        <div class="text-xs font-semibold text-[var(--foreground)] truncate">Traefik Proxy v3</div>
+                        <div class="text-xs text-indigo-500 font-mono truncate">:443 Auto-SSL</div>
+                      </div>
+                    </div>
+                    <div class="flex justify-between text-xs px-2 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] font-mono">
+                      <span>1.4k req/s</span>
+                      <span class="text-emerald-500">TLS 1.3</span>
+                    </div>
+                  </div>
+
+                  <!-- Col 3: Equal-Width Compute Service Nodes -->
+                  <div class="relative z-10 w-72 xl:w-80 shrink-0 space-y-2.5">
+                    ${topProjects.map(p => {
+                      const isSel = selected && selected.id === p.id;
+                      return `
+                        <button type="button" data-topo-service="${esc(p.id)}" onclick="selectTopologyNode('${esc(p.id)}')" class="w-full text-left rounded-xl border p-2.5 flex items-center justify-between gap-2 transition shadow-sm ${isSel ? 'border-indigo-500 bg-gradient-to-r from-indigo-500/15 to-sky-500/10 ring-2 ring-indigo-500/20' : 'border-[var(--border)] bg-[var(--card)] hover:border-indigo-500/40'}">
+                          <div class="flex items-center gap-2.5 min-w-0">
+                            ${stackIconHtml(p.stackKey, 'sm')}
+                            <div class="min-w-0">
+                              <div class="text-xs font-semibold text-[var(--foreground)] truncate">${esc(p.name)}</div>
+                              <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">${esc(p.domain)} • :${esc(p.port)}</div>
+                            </div>
+                          </div>
+                          ${statusBadgeHtml(p.status)}
+                        </button>
+                      `;
+                    }).join('')}
+                  </div>
+
+                  <!-- Col 4: Dedicated Data / Database Column -->
+                  <div class="relative z-10 w-36 shrink-0 flex flex-col justify-center">
+                    <button id="topoNodePostgres" type="button" onclick="selectTopologyNode('${esc(crmTarget ? crmTarget.id : 'crm-fullstack-monorepo')}')" class="w-full text-left rounded-2xl border p-3 shadow-md space-y-2 transition ${isPgSelected ? 'border-emerald-500 bg-gradient-to-br from-emerald-500/15 to-[var(--card)] ring-2 ring-emerald-500/20' : 'border-emerald-500/35 bg-[var(--card)] hover:border-emerald-500'}">
+                      <div class="flex items-center gap-2">
+                        <span class="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 flex items-center justify-center shrink-0">
+                          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                        </span>
+                        <div class="min-w-0">
+                          <div class="text-xs font-semibold text-[var(--foreground)] truncate">Postgres 16</div>
+                          <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">:5432 • Internal</div>
+                        </div>
+                      </div>
+                      <div class="flex items-center justify-between text-xs px-2 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)]">
+                        <span class="inline-flex items-center gap-1 font-medium text-emerald-500"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Healthy</span>
+                        <span class="font-mono text-[var(--muted-foreground)]">db</span>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            `}
+          </div>
+
+          <!-- Selected Node Inspector Strip -->
+          ${selected ? `
+            <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-4 flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3 min-w-0">
+                ${stackIconHtml(selected.stackKey, 'md')}
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-sm font-semibold text-[var(--foreground)]">${esc(selected.name)}</span>
+                    ${statusBadgeHtml(selected.status)}
+                    <span class="text-xs font-mono text-sky-500">https://${esc(selected.domain)}</span>
+                  </div>
+                  <div class="text-xs font-mono text-[var(--muted-foreground)] mt-0.5 truncate">
+                    ${esc(selected.stack)} • ${esc(selected.branch)} @ ${esc(selected.commit)} • CPU ${selected.cpu}% • RAM ${selected.ramMb} MB
+                  </div>
+                </div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <button type="button" onclick="quickRedeploy('${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm">Redeploy</button>
+                <button type="button" onclick="toggleRestartProject('${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">${selected.status === 'Stopped' ? 'Start' : 'Restart'}</button>
+                <button type="button" onclick="openLogsModal('project', '${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">Mở Logs</button>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    function onDashSearch(val) {
+      state.searchQuery = val;
+      renderProjectGrid();
+    }
+
+    function setStackFilter(cat) {
+      state.stackFilter = cat;
+      renderMainView();
+    }
+
+    function renderProjectGrid() {
+      const grid = document.getElementById('projectGrid');
+      if (!grid) return;
+      const list = getFilteredProjects();
+      if (!list.length) {
+        grid.innerHTML = `
+          <div class="col-span-full rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center space-y-2">
+            <div class="text-sm font-medium text-[var(--foreground)]">Không tìm thấy project phù hợp</div>
+            <p class="text-xs text-[var(--muted-foreground)]">Thử đổi từ khóa tìm kiếm hoặc chọn bộ lọc "Tất cả".</p>
+          </div>
+        `;
+        return;
+      }
+
+      grid.innerHTML = list.map((p, idx) => {
+        const isStopped = p.status === 'Stopped';
+        const isBuilding = p.status === 'Building...' || p.status === 'Restarting...';
+        const ramPct = Math.min(100, Math.round((p.ramMb / (p.ramLimitMb || 512)) * 100));
+        const sparkColor = isStopped ? '#f43f5e' : isBuilding ? '#f59e0b' : '#6366f1';
+        const cardBorder = isBuilding
+          ? 'border-amber-500/35 bg-gradient-to-br from-amber-500/10 via-transparent to-transparent'
+          : idx === 0
+          ? 'border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-[var(--card)]'
+          : 'border-[var(--border)] bg-[var(--card)]';
+
+        return `
+          <article class="rounded-2xl border ${cardBorder} p-4 flex flex-col justify-between gap-3 hover:border-indigo-500/45 transition shadow-sm">
+            <div class="space-y-3">
+              <!-- Card Header -->
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex items-start gap-2.5 min-w-0">
+                  ${stackIconHtml(p.stackKey, 'md')}
+                  <div class="min-w-0">
+                    <h3 class="text-sm font-semibold text-[var(--foreground)] truncate">${esc(p.name)}</h3>
+                    <button type="button" onclick="openDomainQuick('${esc(p.domain)}')" class="mt-0.5 inline-flex items-center gap-1 text-xs font-mono text-sky-500 hover:underline truncate max-w-full">
+                      <span class="truncate">https://${esc(p.domain)}</span>
+                      <svg class="w-3 h-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    </button>
+                  </div>
+                </div>
+                ${statusBadgeHtml(p.status)}
+              </div>
+
+              <!-- Stack Badge & Traffic -->
+              <div class="flex flex-wrap items-center justify-between gap-1.5">
+                <span class="text-xs px-2 py-0.5 rounded-lg bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] font-medium">${esc(p.stack)}</span>
+                <span class="text-xs font-mono text-[var(--muted-foreground)]">${esc(p.reqPerSec || '120 req/s')}</span>
+              </div>
+
+              <!-- Mini Sparkline + RAM Progress -->
+              <div class="rounded-xl bg-[var(--content)] border border-[var(--border)] p-2.5 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="w-24 shrink-0">${sparklineSvg(p.trend, sparkColor, `prjGrad-${idx}`, 'h-6')}</div>
+                  <div class="flex-1 text-right text-xs font-mono">
+                    <div class="text-[var(--foreground)]">CPU ${p.cpu}% • RAM ${p.ramMb}MB</div>
+                    <div class="text-[var(--muted-foreground)]">Port :${esc(p.port)}</div>
+                  </div>
+                </div>
+                <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                  <div class="h-full rounded-full ${isStopped ? 'bg-rose-500' : 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500'}" style="width:${ramPct}%"></div>
+                </div>
+              </div>
+
+              <!-- Git Info -->
+              <div class="flex items-center justify-between gap-2 text-xs text-[var(--muted-foreground)]">
+                <span class="inline-flex items-center gap-1.5 font-mono text-[var(--foreground)] truncate">
+                  ${githubIconSvg('w-3.5 h-3.5 shrink-0 text-[var(--muted-foreground)]')}
+                  <span class="truncate">${esc(p.branch)} • ${esc(p.commit)}</span>
+                </span>
+                <span class="shrink-0">${esc(p.updatedAt)}</span>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="pt-2.5 border-t border-[var(--border)] grid grid-cols-3 gap-1.5">
+              <button type="button" ${isBuilding ? 'disabled' : ''} onclick="quickRedeploy('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/20 hover:opacity-95 disabled:opacity-50 transition">
+                ${isBuilding ? 'Building...' : 'Redeploy'}
+              </button>
+              <button type="button" onclick="toggleRestartProject('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition">
+                ${isStopped ? 'Start' : 'Restart'}
+              </button>
+              <button type="button" onclick="openLogsModal('project', '${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition">
+                Logs
+              </button>
+            </div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    function openDomainQuick(domain) {
+      showToast(`Đang mở route HTTPS: https://${domain} (Traefik TLS 1.3)`, 'info');
+    }
+
+    async function quickRedeploy(id) {
+      const p = state.projects.find(item => item.id === id);
+      if (!p || p.status === 'Building...') return;
+      p.status = 'Building...';
+      p.updatedAt = 'Đang build Stage 2/5';
+      p.logs.push(`${new Date().toISOString().slice(0,19)}Z [deploy] Triggered Quick Redeploy on branch ${p.branch}`);
+      if (state.dashboardView === 'grid') renderProjectGrid();
+      else renderMainView();
+      showToast(`Đang redeploy ${p.name}...`, 'warn');
+
+      if (canUseBackend()) {
+        try {
+          const updated = await apiFetch(`/projects/${encodeURIComponent(id)}/redeploy`, { method: 'POST' });
+          await refreshOverview();
+          renderHeader();
+          if (state.activeTab === 'dashboard') renderMainView();
+          showToast(`${p.name} đã deploy xong (${updated.commit || 'latest'})!`, 'success');
+          return;
+        } catch (err) {
+          // Graceful fallback to local simulator when API unreachable
+        }
+      }
+
+      setTimeout(() => {
+        p.status = 'Running';
+        const randHex = Math.random().toString(16).slice(2, 8);
+        p.commit = `sha-${randHex}`;
+        p.updatedAt = 'Vừa xong';
+        p.cpu = Number((Math.random() * 6 + 2).toFixed(1));
+        if (p.ramMb === 0) p.ramMb = 96;
+        p.logs.push(`${new Date().toISOString().slice(0,19)}Z [traefik] Zero-downtime swap completed -> ${p.commit}`);
+        state.containers.forEach(c => {
+          if (c.project === p.name) {
+            c.status = 'Running';
+            c.uptime = 'Up vừa xong';
+            if (c.ramMb === 0) c.ramMb = 64;
+          }
+        });
+        syncVpsRamFromContainers();
+        renderHeader();
+        if (state.activeTab === 'dashboard') renderMainView();
+        showToast(`${p.name} đã deploy xong (${p.commit})!`, 'success');
+      }, 1800);
+    }
+
+    async function toggleRestartProject(id) {
+      const p = state.projects.find(item => item.id === id);
+      if (!p) return;
+
+      if (canUseBackend()) {
+        const wasStopped = p.status === 'Stopped';
+        p.status = wasStopped ? 'Building...' : 'Restarting...';
+        renderMainView();
+        try {
+          await apiFetch(`/projects/${encodeURIComponent(id)}/restart`, { method: 'POST' });
+          await refreshOverview();
+          renderHeader();
+          renderMainView();
+          showToast(wasStopped ? `Đã khởi động ${p.name}` : `Đã restart ${p.name} thành công`, 'success');
+          return;
+        } catch (err) {
+          // Graceful fallback to local simulator
+        }
+      }
+
+      if (p.status === 'Stopped') {
+        p.status = 'Running';
+        p.cpu = 2.1;
+        p.ramMb = 36;
+        p.reqPerSec = '95 req/s';
+        p.trend = [0, 4, 8, 12, 16, 14, 18, 20, 22];
+        p.updatedAt = 'Vừa khởi động';
+        p.logs.push(`${new Date().toISOString().slice(0,19)}Z [docker] Container started`);
+        state.containers.forEach(c => {
+          if (c.project === p.name) {
+            c.status = 'Running';
+            c.cpuPct = 2.1;
+            c.ramMb = 36;
+            c.uptime = 'Up vừa xong';
+          }
+        });
+        showToast(`Đã khởi động ${p.name}`, 'success');
+      } else {
+        p.status = 'Restarting...';
+        p.logs.push(`${new Date().toISOString().slice(0,19)}Z [docker] Restarting container...`);
+        setTimeout(() => {
+          p.status = 'Running';
+          p.updatedAt = 'Vừa restart';
+          p.logs.push(`${new Date().toISOString().slice(0,19)}Z [docker] Healthcheck passed (200 OK)`);
+          state.containers.forEach(c => {
+            if (c.project === p.name) {
+              c.status = 'Running';
+              c.uptime = 'Up vừa restart';
+            }
+          });
+          if (state.activeTab === 'dashboard') renderMainView();
+          showToast(`Đã restart ${p.name} thành công`, 'success');
+        }, 900);
+      }
+      syncVpsRamFromContainers();
+      renderHeader();
+      renderMainView();
+    }
+
+    // =========================================================================
+    // 7. TAB 2: + DEPLOY PROJECT MỚI (3-STEP E2E WIZARD)
+    // =========================================================================
+    function renderWizard(container) {
+      const w = state.wizard;
+      const isMob = state.viewport === 'mobile';
+      const steps = [
+        { num: 1, label: '1. Kết nối SCM' },
+        { num: 2, label: '2. Auto-Detect & Code' },
+        { num: 3, label: '3. Build & Deploy E2E' }
+      ];
+
+      container.innerHTML = `
+        <div class="space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h1 class="text-base font-semibold text-[var(--foreground)]">Deploy Project Mới (E2E Wizard)</h1>
+              <p class="text-xs text-[var(--muted-foreground)]">Kết nối GitHub OAuth/PAT → Hybrid File + AI Auto-Detect → Build Docker &amp; Auto-SSL.</p>
+            </div>
+          </div>
+
+          <!-- 3-Step Stepper -->
+          <div class="grid grid-cols-3 gap-2">
+            ${steps.map(s => {
+              const active = w.step === s.num;
+              const done = w.step > s.num;
+              const cls = active
+                ? 'px-3 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold text-left shadow-sm shadow-indigo-500/25 transition'
+                : done
+                ? 'px-3 py-2.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 text-emerald-500 text-xs font-semibold text-left transition'
+                : 'px-3 py-2.5 rounded-xl border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] text-xs font-medium text-left hover:bg-[var(--accent)] transition';
+              return `
+                <button type="button" onclick="goWizardStep(${s.num})" class="${cls}">
+                  <div class="truncate">${done ? '✓ ' : ''}${esc(s.label)}</div>
+                </button>
+              `;
+            }).join('')}
+          </div>
+
+          <div id="wizardStepBody"></div>
+        </div>
+      `;
+
+      const body = document.getElementById('wizardStepBody');
+      if (w.step === 1) renderWizardStep1(body, isMob);
+      else if (w.step === 2) renderWizardStep2(body, isMob);
+      else renderWizardStep3(body, isMob);
+    }
+
+    function goWizardStep(n) {
+      state.wizard.step = n;
+      if (n === 2 && state.wizard.presetSelection === 'auto') {
+        syncAutoDetectForCurrentRepo(true);
+      }
+      renderMainView();
+      if (n === 2 && canUseBackend() && !state.wizard.serverDockerfile) {
+        syncDetectFromServer(state.wizard.detectMode, state.wizard.presetSelection === 'auto').then(ok => {
+          if (ok && state.activeTab === 'wizard' && state.wizard.step === 2) renderMainView();
+        });
+      }
+    }
+
+    function renderWizardStep1(body, isMob) {
+      const w = state.wizard;
+      body.innerHTML = `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-4 shadow-sm">
+          <!-- SCM Auth Mode Switcher -->
+          <div class="grid ${isMob ? 'grid-cols-1 gap-2.5' : 'grid-cols-2 gap-3'}">
+            <button type="button" onclick="setScmMode('oauth')" class="p-3.5 rounded-2xl border text-left transition ${w.scmMode === 'oauth' ? 'border-indigo-500/45 bg-gradient-to-br from-indigo-500/15 via-sky-500/5 to-transparent ring-2 ring-indigo-500/15' : 'border-[var(--border)] bg-[var(--content)] hover:bg-[var(--accent)]'}">
+              <div class="flex items-center justify-between gap-2">
+                <span class="inline-flex items-center gap-2 text-xs font-semibold text-[var(--foreground)]">
+                  ${githubIconSvg('w-4 h-4')}
+                  <span>GitHub OAuth (Đã kết nối @anh-tang)</span>
+                </span>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 font-medium">Active</span>
+              </div>
+              <p class="mt-1.5 text-xs text-[var(--muted-foreground)]">Chọn repo trực tiếp &amp; tự động cài đặt Push Webhook.</p>
+            </button>
+
+            <button type="button" onclick="setScmMode('pat')" class="p-3.5 rounded-2xl border text-left transition ${w.scmMode === 'pat' ? 'border-indigo-500/45 bg-gradient-to-br from-indigo-500/15 via-sky-500/5 to-transparent ring-2 ring-indigo-500/15' : 'border-[var(--border)] bg-[var(--content)] hover:bg-[var(--accent)]'}">
+              <div class="flex items-center justify-between gap-2">
+                <span class="inline-flex items-center gap-2 text-xs font-semibold text-[var(--foreground)]">
+                  <svg class="w-4 h-4 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                  <span>Nhập GitHub PAT (Personal Access Token)</span>
+                </span>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] font-medium">Private Repo</span>
+              </div>
+              <p class="mt-1.5 text-xs text-[var(--muted-foreground)]">Import nhanh private repo bất kỳ, lưu token mã hóa AES-256-GCM.</p>
+            </button>
+          </div>
+
+          ${w.scmMode === 'oauth' ? `
+            <div class="space-y-3">
+              <div>
+                <label class="block text-xs font-semibold text-[var(--foreground)] mb-2">Chọn Repository từ @anh-tang</label>
+                <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
+                  ${OAUTH_REPOS.map(r => {
+                    const selected = w.oauthRepo === r.repo;
+                    return `
+                      <button type="button" onclick="selectOAuthRepo('${esc(r.repo)}', '${r.preset}')" class="p-3 rounded-xl border text-left flex items-center gap-2.5 transition ${selected ? 'border-indigo-500/50 bg-gradient-to-br from-indigo-500/15 to-sky-500/5 ring-2 ring-indigo-500/15' : 'border-[var(--border)] bg-[var(--content)] hover:bg-[var(--accent)]'}">
+                        ${stackIconHtml(r.preset, 'sm')}
+                        <div class="min-w-0 flex-1">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="text-xs font-mono font-semibold text-[var(--foreground)] truncate">${esc(r.repo)}</span>
+                            <span class="text-xs px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)] shrink-0">${esc(STACK_PRESETS[r.preset].label)}</span>
+                          </div>
+                          <div class="text-xs text-[var(--muted-foreground)] mt-0.5 truncate">${esc(r.desc)}</div>
+                        </div>
+                      </button>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-3'} gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Branch deploy</label>
+                  <select onchange="state.wizard.oauthBranch = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)]">
+                    ${['main', 'production', 'staging', 'feat/v2'].map(b => `<option value="${b}" ${w.oauthBranch === b ? 'selected' : ''}>${b}</option>`).join('')}
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Tên Project</label>
+                  <input type="text" value="${esc(w.appName)}" oninput="state.wizard.appName = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)] font-mono" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Domain Auto-SSL</label>
+                  <input type="text" value="${esc(w.domain)}" oninput="state.wizard.domain = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)] font-mono" />
+                </div>
+              </div>
+
+              <label class="flex items-center gap-2 text-xs text-[var(--foreground)] cursor-pointer select-none">
+                <input type="checkbox" ${w.autoWebhook ? 'checked' : ''} onchange="state.wizard.autoWebhook = this.checked" class="rounded" />
+                <span>Tự động gắn GitHub Webhook (Push-to-Deploy khi có commit mới)</span>
+              </label>
+            </div>
+          ` : `
+            <div class="space-y-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span class="text-[var(--muted-foreground)]">Scopes yêu cầu:</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] font-mono">repo</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] font-mono">read:packages</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] font-mono">admin:repo_hook</span>
+                </div>
+                <button type="button" onclick="fillSamplePat()" class="text-xs font-semibold text-indigo-500 hover:underline">Điền Token mẫu để test</button>
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">GitHub Personal Access Token (PAT)</label>
+                  <div class="flex gap-1.5">
+                    <input id="patTokenInput" type="${w.patShow ? 'text' : 'password'}" value="${esc(w.patToken)}" oninput="state.wizard.patToken = this.value; state.wizard.patVerified = false;" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" class="flex-1 px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                    <button type="button" onclick="state.wizard.patShow = !state.wizard.patShow; renderMainView();" class="px-3 py-2 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs">${w.patShow ? 'Ẩn' : 'Hiện'}</button>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Repository URL (HTTPS / SSH)</label>
+                  <input type="text" value="${esc(w.patRepoUrl)}" oninput="state.wizard.patRepoUrl = this.value; state.wizard.patVerified = false;" placeholder="https://github.com/org/private-repo.git" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-3'} gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Branch</label>
+                  <input type="text" value="${esc(w.patBranch)}" oninput="state.wizard.patBranch = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Tên Project</label>
+                  <input type="text" value="${esc(w.appName)}" oninput="state.wizard.appName = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Domain Auto-SSL</label>
+                  <input type="text" value="${esc(w.domain)}" oninput="state.wizard.domain = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <button type="button" onclick="validatePatImport()" class="px-3.5 py-2 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-xs font-semibold transition">
+                  ${w.patChecking ? 'Đang kiểm tra kết nối GitHub...' : 'Kiểm tra & Import'}
+                </button>
+                ${w.patError ? `<span class="text-xs text-rose-500 font-medium">${esc(w.patError)}</span>` : ''}
+                ${w.patVerified ? `<span class="text-xs px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-medium">✓ Token hợp lệ • Quyền repo, admin:repo_hook • AES-256 Encrypted</span>` : ''}
+              </div>
+            </div>
+          `}
+
+          <div class="pt-3 border-t border-[var(--border)] flex items-center justify-end">
+            <button type="button" onclick="goWizardStep(2)" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 transition">
+              Tiếp tục Bước 2: Auto-Detect Stack →
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function inferPresetFromRepoStr(repoStr) {
+      const lower = String(repoStr || '').toLowerCase();
+      if (lower.includes('monorepo') || lower.includes('fullstack') || lower.includes('compose')) return 'compose';
+      if (lower.includes('rust') || lower.includes('actix') || lower.includes('cargo')) return 'rust';
+      if (lower.includes('go') || lower.includes('golang') || lower.includes('billing')) return 'go';
+      if (lower.includes('angular') || lower.includes('react') || lower.includes('vite') || lower.includes('spa')) return 'spa';
+      return 'nextjs';
+    }
+
+    function syncAutoDetectForCurrentRepo(shouldApplyPreset = true) {
+      const w = state.wizard;
+      const source = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const matchedOAuth = w.scmMode === 'oauth' ? OAUTH_REPOS.find(r => r.repo === w.oauthRepo) : null;
+      const resolved = matchedOAuth ? matchedOAuth.preset : inferPresetFromRepoStr(source);
+      const profile = AUTO_DETECT_PROFILES[resolved] || AUTO_DETECT_PROFILES.nextjs;
+
+      w.autoResolvedPreset = resolved;
+      w.detectedFiles = [...profile.files];
+      w.aiInsight = profile.aiInsight;
+      w.scanMeta = w.detectMode === 'hybrid'
+        ? '99% Match • 85ms (Trees API + AI)'
+        : '94% Match • 18ms (Trees API Rule-based)';
+
+      if (shouldApplyPreset && w.presetSelection === 'auto') {
+        applyWizardPreset(resolved, false);
+      }
+    }
+
+    function setScmMode(mode) {
+      state.wizard.scmMode = mode;
+      syncAutoDetectForCurrentRepo(true);
+      renderMainView();
+    }
+
+    function selectOAuthRepo(repo, preset) {
+      const slug = repo.split('/').pop();
+      state.wizard.oauthRepo = repo;
+      state.wizard.appName = slug;
+      state.wizard.domain = `${slug.split('-')[0]}.anna.dev`;
+      state.wizard.presetSelection = 'auto';
+      syncAutoDetectForCurrentRepo(false);
+      applyWizardPreset(preset, false);
+      renderMainView();
+    }
+
+    function fillSamplePat() {
+      state.wizard.patToken = 'ghp_DeploymentHubDemo9821aBcDeFgHiJk';
+      state.wizard.patRepoUrl = 'https://github.com/my-org/private-go-api.git';
+      state.wizard.appName = 'private-go-api';
+      state.wizard.domain = 'private-api.anna.dev';
+      state.wizard.patError = '';
+      syncAutoDetectForCurrentRepo(true);
+      renderMainView();
+    }
+
+    function applyDetectResultToWizard(res, applyConfig = true) {
+      if (!res || typeof res !== 'object') return;
+      const w = state.wizard;
+      if (res.presetKey && STACK_PRESETS[res.presetKey]) {
+        w.autoResolvedPreset = res.presetKey;
+      }
+      if (Array.isArray(res.detectedFiles) && res.detectedFiles.length) {
+        w.detectedFiles = res.detectedFiles;
+      }
+      if (res.insight) {
+        w.aiInsight = res.insight;
+      }
+      if (res.mode) {
+        w.detectMode = res.mode;
+      }
+      const conf = res.confidence || 99;
+      const dur = res.scanDurationMs || 18;
+      w.scanMeta = `${conf}% Match • ${dur}ms (${(res.mode || w.detectMode) === 'hybrid' ? 'Go Trees + AI' : 'Go File Rule-based'})`;
+      w.serverDockerfile = res.dockerfile || '';
+
+      if (applyConfig) {
+        if (res.presetKey && STACK_PRESETS[res.presetKey]) w.presetKey = res.presetKey;
+        if (res.buildCmd) w.buildCmd = res.buildCmd;
+        if (res.startCmd) w.startCmd = res.startCmd;
+        if (res.portMapping) w.portMapping = res.portMapping;
+        if (Array.isArray(res.envVars) && res.envVars.length) {
+          w.envVars = res.envVars.map(ev => ({ key: ev.key || '', value: ev.value || '', secret: Boolean(ev.secret) }));
+        }
+      }
+    }
+
+    async function syncDetectFromServer(modeOverride, applyConfig = true) {
+      if (!canUseBackend()) return false;
+      const w = state.wizard;
+      const repoUrl = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const branch = w.scmMode === 'oauth' ? w.oauthBranch : w.patBranch;
+      const mode = modeOverride || w.detectMode;
+      try {
+        const res = await apiFetch('/detect', {
+          method: 'POST',
+          body: JSON.stringify({ repoUrl, branch, mode })
+        });
+        applyDetectResultToWizard(res, applyConfig);
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+
+    async function syncDockerfileFromServer() {
+      if (!canUseBackend()) return false;
+      const w = state.wizard;
+      try {
+        const res = await apiFetch('/detect/dockerfile', {
+          method: 'POST',
+          body: JSON.stringify({
+            presetKey: w.presetKey,
+            mode: w.detectMode,
+            appName: w.appName,
+            domain: w.domain,
+            buildCmd: w.buildCmd,
+            startCmd: w.startCmd,
+            portMapping: w.portMapping,
+            envVars: w.envVars
+          })
+        });
+        if (res && res.dockerfile) {
+          w.serverDockerfile = res.dockerfile;
+          const box = document.getElementById('dockerfilePreview');
+          if (box && state.activeTab === 'wizard' && w.step === 2) {
+            box.innerHTML = highlightCodeHtml(res.dockerfile);
+          }
+          return true;
+        }
+      } catch (err) {
+        // Silent client-side Dockerfile fallback
+      }
+      return false;
+    }
+
+    function scheduleServerDockerfileSync() {
+      state.wizard.serverDockerfile = '';
+      if (!canUseBackend()) return;
+      if (dfSyncTimer) clearTimeout(dfSyncTimer);
+      dfSyncTimer = setTimeout(() => {
+        syncDockerfileFromServer();
+      }, 260);
+    }
+
+    async function validatePatImport() {
+      const w = state.wizard;
+      if (!w.patToken.trim() || !w.patRepoUrl.trim()) {
+        w.patError = 'Vui lòng nhập GitHub PAT và Repo URL (hoặc bấm "Điền Token mẫu").';
+        w.patVerified = false;
+        renderMainView();
+        return;
+      }
+      w.patError = '';
+      w.patChecking = true;
+      renderMainView();
+
+      if (canUseBackend()) {
+        try {
+          const res = await apiFetch('/scm/verify-pat', {
+            method: 'POST',
+            body: JSON.stringify({ token: w.patToken.trim(), repoUrl: w.patRepoUrl.trim() })
+          });
+          w.patChecking = false;
+          w.patVerified = Boolean(res.valid);
+          w.presetSelection = 'auto';
+          if (res.detectResult) {
+            applyDetectResultToWizard(res.detectResult, true);
+          } else {
+            syncAutoDetectForCurrentRepo(true);
+          }
+          renderMainView();
+          const label = STACK_PRESETS[w.autoResolvedPreset]?.label || w.autoResolvedPreset;
+          showToast(`Xác thực PAT (${res.encryptedTokenPreview || 'AES-256-GCM'}) → ${label}!`, 'success');
+          return;
+        } catch (err) {
+          const msg = err && err.message ? err.message : '';
+          if (msg && !/fetch|network|abort/i.test(msg)) {
+            w.patChecking = false;
+            w.patVerified = false;
+            w.patError = msg;
+            renderMainView();
+            return;
+          }
+          // Unreachable backend -> graceful simulator fallback
+        }
+      }
+
+      setTimeout(() => {
+        w.patChecking = false;
+        w.patVerified = true;
+        w.presetSelection = 'auto';
+        syncAutoDetectForCurrentRepo(true);
+        renderMainView();
+        showToast(`Xác thực PAT & Auto-Detect → ${STACK_PRESETS[w.autoResolvedPreset].label}!`, 'success');
+      }, 650);
+    }
+
+    function applyWizardPreset(presetKey, shouldRender = true) {
+      const p = STACK_PRESETS[presetKey];
+      if (!p) return;
+      state.wizard.presetKey = presetKey;
+      state.wizard.buildCmd = p.buildCmd;
+      state.wizard.startCmd = p.startCmd;
+      state.wizard.portMapping = p.portMapping;
+      state.wizard.envVars = JSON.parse(JSON.stringify(p.envVars));
+      state.wizard.serverDockerfile = '';
+      if (shouldRender) renderMainView();
+    }
+
+    function selectPresetCard(choice) {
+      const w = state.wizard;
+      if (choice === 'auto') {
+        w.presetSelection = 'auto';
+        syncAutoDetectForCurrentRepo(true);
+        renderMainView();
+        if (canUseBackend()) {
+          syncDetectFromServer(w.detectMode, true).then(ok => {
+            if (ok && state.activeTab === 'wizard' && w.step === 2) renderMainView();
+          });
+        }
+        showToast(`Auto-Detect chọn ${STACK_PRESETS[w.autoResolvedPreset].label}`, 'info');
+      } else {
+        w.presetSelection = choice;
+        applyWizardPreset(choice, true);
+        if (canUseBackend()) syncDockerfileFromServer();
+      }
+    }
+
+    async function setDetectMode(mode) {
+      const w = state.wizard;
+      w.detectMode = mode;
+      w.serverDockerfile = '';
+      syncAutoDetectForCurrentRepo(w.presetSelection === 'auto');
+      renderMainView();
+      showToast(
+        mode === 'hybrid'
+          ? 'Đã bật Hybrid: File Scan + AI Smart Assist'
+          : 'Đã chuyển sang Detect bằng File (Rule-based, 0 Token)',
+        'info'
+      );
+      if (canUseBackend()) {
+        const ok = w.presetSelection === 'auto'
+          ? await syncDetectFromServer(mode, true)
+          : await syncDockerfileFromServer();
+        if (ok && state.activeTab === 'wizard' && w.step === 2) renderMainView();
+      }
+    }
+
+    async function runAutoDetectScan() {
+      const w = state.wizard;
+      if (scanTimer) clearTimeout(scanTimer);
+      w.isScanning = true;
+      w.presetSelection = 'auto';
+      w.serverDockerfile = '';
+      renderMainView();
+
+      if (canUseBackend()) {
+        const ok = await syncDetectFromServer(w.detectMode, true);
+        if (ok) {
+          w.isScanning = false;
+          renderMainView();
+          const label = STACK_PRESETS[w.autoResolvedPreset]?.label || w.autoResolvedPreset;
+          showToast(`Quét Repo hoàn tất → Phát hiện ${label} (${w.detectMode === 'hybrid' ? 'File + AI' : 'File Scan'})`, 'success');
+          return;
+        }
+      }
+
+      scanTimer = setTimeout(() => {
+        w.isScanning = false;
+        syncAutoDetectForCurrentRepo(true);
+        renderMainView();
+        const label = STACK_PRESETS[w.autoResolvedPreset].label;
+        showToast(`Quét Repo hoàn tất → Phát hiện ${label} (${w.detectMode === 'hybrid' ? 'File + AI' : 'File Scan'})`, 'success');
+      }, 550);
+    }
+
+    function renderWizardStep2(body, isMob) {
+      const w = state.wizard;
+      const preset = STACK_PRESETS[w.presetKey];
+      const autoProfile = AUTO_DETECT_PROFILES[w.autoResolvedPreset] || AUTO_DETECT_PROFILES.nextjs;
+      const resolvedLabel = STACK_PRESETS[w.autoResolvedPreset]?.label || 'Next.js';
+      const activeRepo = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+
+      const macTitle = `
+        <div class="flex items-center gap-2 min-w-0">
+          <span id="previewFilename" class="text-xs font-mono font-semibold text-[var(--foreground)]">${esc(preset.filename)}</span>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-500 border border-indigo-500/30 font-mono truncate">${esc(w.detectMode === 'hybrid' ? 'Hybrid File + AI' : 'File Rule-based')}</span>
+        </div>
+      `;
+      const macRight = `
+        <span class="text-xs font-mono text-emerald-500 hidden sm:inline">${esc(preset.footprint)}</span>
+        <button type="button" onclick="copyDockerfile()" class="text-xs px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] hover:bg-[var(--accent)] font-medium">Copy</button>
+      `;
+
+      body.innerHTML = `
+        <div class="space-y-4">
+          <!-- Auto-Detect Engine + Stack Preset Selector -->
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3.5 shadow-sm">
+            <!-- Auto-Detect Engine Control Bar -->
+            <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-3.5 space-y-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  ${stackIconHtml('auto', 'sm')}
+                  <div class="min-w-0">
+                    <div class="text-xs font-semibold text-[var(--foreground)]">Auto-Detect Engine</div>
+                    <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">${esc(activeRepo)}</div>
+                  </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-xs font-mono text-emerald-500 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-full">${esc(w.scanMeta)}</span>
+                  <button type="button" ${w.isScanning ? 'disabled' : ''} onclick="runAutoDetectScan()" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 disabled:opacity-60 transition">
+                    ${w.isScanning ? 'Đang quét cây thư mục & manifest...' : 'Quét lại Repo (Auto-Detect)'}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Detection Mode Switcher -->
+              <div class="grid ${isMob ? 'grid-cols-1 gap-2' : 'grid-cols-2 gap-2.5'}">
+                <button type="button" onclick="setDetectMode('file')" class="px-3 py-2.5 rounded-xl border text-left transition ${w.detectMode === 'file' ? 'border-indigo-500 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-indigo-500/20' : 'border-[var(--border)] bg-[var(--card)]/60 text-[var(--muted-foreground)] hover:bg-[var(--accent)]'}">
+                  <div class="flex items-center justify-between gap-2 text-xs font-semibold">
+                    <span>🔍 Detect bằng File (Rule-based)</span>
+                    <span class="font-mono text-xs ${w.detectMode === 'file' ? 'text-emerald-500' : ''}">&lt; 100ms • 0 Token</span>
+                  </div>
+                  <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Quét manifest chuẩn: package.json, go.mod, Cargo.toml, lockfiles.</div>
+                </button>
+                <button type="button" onclick="setDetectMode('hybrid')" class="px-3 py-2.5 rounded-xl border text-left transition ${w.detectMode === 'hybrid' ? 'border-indigo-500 bg-[var(--card)] text-[var(--foreground)] ring-2 ring-indigo-500/20' : 'border-[var(--border)] bg-[var(--card)]/60 text-[var(--muted-foreground)] hover:bg-[var(--accent)]'}">
+                  <div class="flex items-center justify-between gap-2 text-xs font-semibold">
+                    <span>✨ Hybrid: File + AI Assist (Khuyên dùng)</span>
+                    <span class="font-mono text-xs ${w.detectMode === 'hybrid' ? 'text-emerald-500' : ''}">Metadata Only</span>
+                  </div>
+                  <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Quét file + AI tự thêm native OS deps &amp; đồng bộ .env.example.</div>
+                </button>
+              </div>
+
+              <!-- Detected Files & AI Insights -->
+              <div class="space-y-1.5">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="text-xs text-[var(--muted-foreground)] font-medium">Detected Files:</span>
+                  ${w.detectedFiles.map(f => `<span class="text-xs px-2 py-0.5 rounded-md bg-[var(--card)] border border-[var(--border)] font-mono text-[var(--foreground)]">✓ ${esc(f)}</span>`).join('')}
+                </div>
+                <div class="text-xs px-3 py-2 rounded-xl border ${w.detectMode === 'hybrid' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500' : 'border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)]'}">
+                  ${w.detectMode === 'hybrid' ? esc(w.aiInsight) : esc(autoProfile.fileNote)}
+                </div>
+              </div>
+            </div>
+
+            <!-- Preset Header -->
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 class="text-sm font-semibold text-[var(--foreground)]">Stack Preset &amp; Chiến lược Build</h2>
+                <p class="text-xs text-[var(--muted-foreground)]">${esc(preset.strategy)}</p>
+              </div>
+              <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-mono font-medium">Image: ${esc(preset.footprint)}</span>
+            </div>
+
+            <!-- 6 Preset Cards (Auto-Detect first + 5 manual overrides) -->
+            <div class="grid ${isMob ? 'grid-cols-2 gap-2' : 'grid-cols-3 lg:grid-cols-6 gap-2'}">
+              <button type="button" onclick="selectPresetCard('auto')" class="p-2.5 rounded-xl border text-left flex items-center gap-2 transition ${w.presetSelection === 'auto' ? 'border-indigo-500 bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/25' : 'border-[var(--border)] bg-[var(--content)] text-[var(--foreground)] hover:bg-[var(--accent)]'}">
+                ${w.presetSelection === 'auto'
+                  ? `<span class="w-7 h-7 rounded-lg bg-[var(--background)]/20 flex items-center justify-center shrink-0">✨</span>`
+                  : stackIconHtml('auto', 'sm')
+                }
+                <div class="min-w-0">
+                  <div class="text-xs font-semibold truncate">Auto-Detect</div>
+                  <div class="text-xs ${w.presetSelection === 'auto' ? 'opacity-90' : 'text-[var(--muted-foreground)]'} font-mono truncate">→ ${esc(resolvedLabel)}</div>
+                </div>
+              </button>
+              ${Object.values(STACK_PRESETS).map(p => {
+                const active = w.presetSelection === p.id;
+                return `
+                  <button type="button" onclick="selectPresetCard('${p.id}')" class="p-2.5 rounded-xl border text-left flex items-center gap-2 transition ${active ? 'border-indigo-500 bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/25' : 'border-[var(--border)] bg-[var(--content)] text-[var(--foreground)] hover:bg-[var(--accent)]'}">
+                    ${active
+                      ? `<span class="w-7 h-7 rounded-lg bg-[var(--background)]/20 flex items-center justify-center shrink-0 text-xs font-bold">${esc(p.label[0])}</span>`
+                      : stackIconHtml(p.id, 'sm')
+                    }
+                    <div class="min-w-0">
+                      <div class="text-xs font-semibold truncate">${esc(p.label)}</div>
+                      <div class="text-xs ${active ? 'opacity-90' : 'text-[var(--muted-foreground)]'} font-mono">${esc(p.footprint)}</div>
+                    </div>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Config + macOS Live Dockerfile Split -->
+          <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-4">
+            <!-- Left: Build, Start, Port & Env Vars -->
+            <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3 shadow-sm">
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">Cấu hình Build &amp; Biến môi trường</h3>
+
+              <div>
+                <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Build Command</label>
+                <input type="text" value="${esc(w.buildCmd)}" oninput="state.wizard.buildCmd = this.value; refreshDockerfilePreview();" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-2.5">
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Start Command</label>
+                  <input type="text" value="${esc(w.startCmd)}" oninput="state.wizard.startCmd = this.value; refreshDockerfilePreview();" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Port Mapping</label>
+                  <input type="text" value="${esc(w.portMapping)}" oninput="state.wizard.portMapping = this.value; refreshDockerfilePreview();" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+              </div>
+
+              <!-- Editable Env Vars -->
+              <div class="space-y-2 pt-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-[var(--foreground)]">Environment Variables (.env)</span>
+                  <button type="button" onclick="addWizardEnv()" class="text-xs px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] font-medium">+ Thêm biến</button>
+                </div>
+                <div class="space-y-1.5">
+                  ${w.envVars.map((env, idx) => `
+                    <div class="flex items-center gap-1.5">
+                      <input type="text" value="${esc(env.key)}" placeholder="KEY" oninput="updateWizardEnv(${idx}, 'key', this.value)" class="w-2/5 px-2.5 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                      <input type="${env.secret ? 'password' : 'text'}" value="${esc(env.value)}" placeholder="VALUE" oninput="updateWizardEnv(${idx}, 'value', this.value)" class="flex-1 px-2.5 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                      <button type="button" onclick="toggleEnvSecret(${idx})" class="px-2 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]">${env.secret ? 'Ẩn' : 'Hiện'}</button>
+                      <button type="button" onclick="removeWizardEnv(${idx})" class="px-2 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs text-rose-500 hover:bg-rose-500/10">×</button>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: macOS Code Editor Preview -->
+            <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 flex flex-col justify-between gap-3 shadow-sm">
+              ${macWindowShell(macTitle, macRight, highlightCodeHtml(generateDockerfilePreview()), 'dockerfilePreview')}
+
+              <div class="pt-2 border-t border-[var(--border)] flex items-center justify-between gap-2">
+                <button type="button" onclick="goWizardStep(1)" class="px-3 py-2 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">← Quay lại Bước 1</button>
+                <button type="button" onclick="goWizardStep(3)" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95">Tiếp tục Bước 3 →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function refreshDockerfilePreview() {
+      scheduleServerDockerfileSync();
+      const box = document.getElementById('dockerfilePreview');
+      if (box) box.innerHTML = highlightCodeHtml(generateDockerfilePreview());
+    }
+
+    function updateWizardEnv(idx, field, val) {
+      if (state.wizard.envVars[idx]) {
+        state.wizard.envVars[idx][field] = val;
+        refreshDockerfilePreview();
+      }
+    }
+
+    function toggleEnvSecret(idx) {
+      if (state.wizard.envVars[idx]) {
+        state.wizard.envVars[idx].secret = !state.wizard.envVars[idx].secret;
+        scheduleServerDockerfileSync();
+        renderMainView();
+      }
+    }
+
+    function addWizardEnv() {
+      state.wizard.envVars.push({ key: 'NEW_VAR', value: 'value', secret: false });
+      scheduleServerDockerfileSync();
+      renderMainView();
+    }
+
+    function removeWizardEnv(idx) {
+      state.wizard.envVars.splice(idx, 1);
+      scheduleServerDockerfileSync();
+      renderMainView();
+    }
+
+    function copyDockerfile() {
+      const text = generateDockerfilePreview();
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+      showToast(`Đã sao chép ${STACK_PRESETS[state.wizard.presetKey].filename}!`, 'success');
+    }
+
+    function renderWizardStep3(body, isMob) {
+      const w = state.wizard;
+      const preset = STACK_PRESETS[w.presetKey];
+      const repoName = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const branch = w.scmMode === 'oauth' ? w.oauthBranch : w.patBranch;
+
+      const stages = [
+        { idx: 1, title: 'Clone SCM' },
+        { idx: 2, title: 'Auto-Generate Dockerfile' },
+        { idx: 3, title: 'Docker Build Image' },
+        { idx: 4, title: 'Healthcheck Container' },
+        { idx: 5, title: 'Traefik SSL Route' }
+      ];
+
+      const termBodyHtml = w.deployLogs.length
+        ? w.deployLogs.map(line => `<div>${highlightTerminalLineHtml(line)}</div>`).join('')
+        : '<div class="text-[var(--muted-foreground)]">Nhấn "Bắt đầu Build &amp; Deploy" để chạy pipeline 5 bước E2E...</div>';
+
+      body.innerHTML = `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-4 shadow-sm">
+          <!-- Summary & Gradient CTA -->
+          <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--border)]">
+            <div class="flex items-center gap-3 min-w-0">
+              ${stackIconHtml(w.presetKey, 'md')}
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-sm font-semibold text-[var(--foreground)]">${esc(w.appName)}</span>
+                  <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-500 border border-indigo-500/30">${esc(preset.badge)}</span>
+                  <span class="text-xs px-2 py-0.5 rounded-full bg-[var(--content)] text-[var(--muted-foreground)] border border-[var(--border)] font-mono">${w.scmMode === 'oauth' ? 'GitHub OAuth' : 'GitHub PAT'}</span>
+                </div>
+                <div class="text-xs font-mono text-[var(--muted-foreground)] mt-0.5 truncate">
+                  ${esc(repoName)} (${esc(branch)}) → https://${esc(w.domain)}
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <button type="button" onclick="goWizardStep(2)" class="px-3 py-2 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">← Sửa cấu hình</button>
+              <button type="button" ${w.deployStatus === 'running' ? 'disabled' : ''} onclick="startE2EDeploy()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 disabled:opacity-50 transition">
+                ${w.deployStatus === 'running' ? 'Đang Build & Deploy...' : w.deployStatus === 'success' ? 'Chạy lại Build & Deploy' : 'Bắt đầu Build & Deploy'}
+              </button>
+            </div>
+          </div>
+
+          <!-- 5-Stage Pipeline -->
+          <div class="grid ${isMob ? 'grid-cols-1 gap-2' : 'grid-cols-5 gap-2'}">
+            ${stages.map(st => {
+              const isDone = w.deployStage >= st.idx && (w.deployStatus === 'success' || w.deployStage > st.idx);
+              const isCurrent = w.deployStatus === 'running' && w.deployStage === st.idx;
+              const cls = isDone
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500 ring-2 ring-emerald-500/15'
+                : isCurrent
+                ? 'border-amber-500/50 bg-amber-500/10 text-amber-500 ring-2 ring-amber-500/15'
+                : 'border-[var(--border)] bg-[var(--content)] text-[var(--muted-foreground)]';
+              const mark = isDone ? '✓' : isCurrent ? '●' : `${st.idx}.`;
+              return `
+                <div class="px-3 py-2.5 rounded-xl border text-xs font-medium flex items-center gap-2 ${cls}">
+                  <span class="${isCurrent ? 'pulse-dot' : ''} font-mono">${mark}</span>
+                  <span class="truncate">${esc(st.title)}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+
+          <!-- macOS Live Build Terminal Chrome -->
+          ${macWindowShell(
+            `<span class="text-xs font-mono font-semibold text-[var(--foreground)]">Build &amp; Deploy Terminal Stream</span>`,
+            `<span class="text-xs font-mono px-2 py-0.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)]">${w.deployStatus === 'idle' ? 'Sẵn sàng' : w.deployStatus === 'running' ? `Stage ${w.deployStage}/5` : 'Exit Code 0'}</span>`,
+            `<div class="space-y-1 min-h-[175px]">${termBodyHtml}</div>`,
+            'wizardTerminal',
+            'max-h-[250px]'
+          )}
+
+          ${w.deployStatus === 'success' ? `
+            <div class="rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-500/15 via-sky-500/10 to-transparent p-3.5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div class="text-xs font-semibold text-emerald-500">✓ Deploy thành công! Container healthy &amp; SSL Let's Encrypt đã kích hoạt.</div>
+                <div class="text-xs font-mono text-[var(--foreground)] mt-0.5">Live URL: https://${esc(w.domain)}</div>
+              </div>
+              <button type="button" onclick="openDeployedOnDashboard()" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25">
+                Xem Project trên Dashboard →
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    function clearDeployTimers() {
+      deployTimers.forEach(t => clearTimeout(t));
+      deployTimers = [];
+      if (activeDeploySource) {
+        try { activeDeploySource.close(); } catch {}
+        activeDeploySource = null;
+      }
+    }
+
+    function runSimulatedDeploy() {
+      const w = state.wizard;
+      const preset = STACK_PRESETS[w.presetKey];
+      w.deployStatus = 'running';
+      w.deployStage = 1;
+      if (!w.deployLogs.length) {
+        w.deployLogs = [
+          `$ deploymenthub deploy ${w.appName} --detect=${w.detectMode} --preset=${w.presetKey} --ssl=${w.domain}`
+        ];
+      }
+      w.deployedOnce = false;
+      renderMainView();
+
+      const lines = preset.buildLogs;
+      lines.forEach((line, idx) => {
+        const t = setTimeout(() => {
+          const stageNum = Math.min(5, Math.floor((idx / lines.length) * 5) + 1);
+          w.deployStage = stageNum;
+          w.deployLogs.push(`${new Date().toISOString().slice(11,19)} ${line}`);
+
+          if (idx === lines.length - 1) {
+            w.deployStage = 5;
+            w.deployStatus = 'success';
+            syncNewlyDeployedProject();
+            showToast(`Deploy ${w.appName} thành công!`, 'success');
+          }
+
+          if (state.activeTab === 'wizard' && w.step === 3) {
+            renderMainView();
+            const term = document.getElementById('wizardTerminal');
+            if (term) term.scrollTop = term.scrollHeight;
+          }
+        }, (idx + 1) * 420);
+        deployTimers.push(t);
+      });
+    }
+
+    async function startE2EDeploy() {
+      clearDeployTimers();
+      const w = state.wizard;
+      const repoUrl = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const branch = w.scmMode === 'oauth' ? w.oauthBranch : w.patBranch;
+
+      if (!canUseBackend()) {
+        runSimulatedDeploy();
+        return;
+      }
+
+      w.deployStatus = 'running';
+      w.deployStage = 1;
+      w.deployId = '';
+      w.deployLogs = [
+        `$ deploymenthub deploy ${w.appName} --detect=${w.detectMode} --preset=${w.presetKey} --ssl=${w.domain}`
+      ];
+      w.deployedOnce = false;
+      renderMainView();
+
+      try {
+        const rec = await apiFetch('/deployments', {
+          method: 'POST',
+          body: JSON.stringify({
+            appName: w.appName,
+            repoUrl,
+            branch,
+            domain: w.domain,
+            scmMode: w.scmMode,
+            pat: w.patToken,
+            detectMode: w.detectMode,
+            presetKey: w.presetKey,
+            buildCmd: w.buildCmd,
+            startCmd: w.startCmd,
+            portMapping: w.portMapping,
+            autoWebhook: w.autoWebhook,
+            envVars: w.envVars
+          })
+        });
+        const deployId = rec && rec.id;
+        if (!deployId || typeof EventSource !== 'function') {
+          runSimulatedDeploy();
+          return;
+        }
+        w.deployId = deployId;
+
+        const finishRemoteDeploy = async (isFailed) => {
+          clearDeployTimers();
+          w.deployStage = 5;
+          w.deployStatus = isFailed ? 'error' : 'success';
+          w.deployedOnce = true;
+          await refreshOverview();
+          renderAll();
+          const term = document.getElementById('wizardTerminal');
+          if (term) term.scrollTop = term.scrollHeight;
+          showToast(
+            isFailed ? `Deploy ${w.appName} gặp lỗi.` : `Deploy ${w.appName} thành công!`,
+            isFailed ? 'error' : 'success'
+          );
+        };
+
+        const streamUrl = `/api/v1/deployments/${encodeURIComponent(deployId)}/stream`;
+        const es = new EventSource(streamUrl);
+        activeDeploySource = es;
+
+        es.onmessage = (ev) => {
+          let evt = null;
+          try { evt = JSON.parse(ev.data); } catch { return; }
+          if (!evt) return;
+          if (evt.stage) w.deployStage = Math.max(w.deployStage, Number(evt.stage));
+          if (evt.line && w.deployLogs[w.deployLogs.length - 1] !== evt.line) {
+            w.deployLogs.push(evt.line);
+          }
+          if (state.activeTab === 'wizard' && w.step === 3) {
+            renderMainView();
+            const term = document.getElementById('wizardTerminal');
+            if (term) term.scrollTop = term.scrollHeight;
+          }
+          if (evt.done) {
+            finishRemoteDeploy(evt.status === 'failed');
+          }
+        };
+
+        es.onerror = () => {
+          if (w.deployStatus !== 'running') return;
+          if (activeDeploySource === es) {
+            try { es.close(); } catch {}
+            activeDeploySource = null;
+          }
+          const poll = async () => {
+            try {
+              const latest = await apiFetch(`/deployments/${encodeURIComponent(deployId)}`);
+              if (latest && Array.isArray(latest.logs) && latest.logs.length) {
+                w.deployLogs = latest.logs;
+              }
+              if (latest && latest.stage) w.deployStage = latest.stage;
+              if (latest && (latest.status === 'success' || latest.status === 'failed')) {
+                await finishRemoteDeploy(latest.status === 'failed');
+              } else {
+                const t = setTimeout(poll, 450);
+                deployTimers.push(t);
+              }
+            } catch {
+              runSimulatedDeploy();
+            }
+          };
+          const t = setTimeout(poll, 350);
+          deployTimers.push(t);
+        };
+      } catch (err) {
+        w.deployLogs = [];
+        runSimulatedDeploy();
+      }
+    }
+
+    function syncNewlyDeployedProject() {
+      const w = state.wizard;
+      if (w.deployedOnce) return;
+      w.deployedOnce = true;
+
+      const preset = STACK_PRESETS[w.presetKey];
+      const existing = state.projects.find(p => p.name === w.appName);
+      const portNum = (w.portMapping.match(/\d+/) || ['3000'])[0];
+      const repoName = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const branch = w.scmMode === 'oauth' ? w.oauthBranch : w.patBranch;
+
+      if (!existing) {
+        state.projects.unshift({
+          id: w.appName,
+          name: w.appName,
+          stackKey: w.presetKey,
+          stack: preset.badge,
+          category: preset.category,
+          domain: w.domain,
+          repo: repoName,
+          branch: branch,
+          commit: 'sha-1a9f4e',
+          commitMsg: 'initial E2E deploy from wizard',
+          status: 'Running',
+          cpu: 2.8,
+          ramMb: w.presetKey === 'nextjs' ? 142 : 32,
+          ramLimitMb: 512,
+          port: portNum,
+          reqPerSec: '180 req/s',
+          trend: [8, 12, 14, 19, 17, 22, 24, 21, 25],
+          updatedAt: 'Vừa xong',
+          logs: [...w.deployLogs]
+        });
+        state.containers.unshift({
+          id: `cnt-${Date.now()}`,
+          name: `dh-${w.appName}`,
+          project: w.appName,
+          stackKey: w.presetKey,
+          image: `${w.appName}:sha-1a9f4e`,
+          previousTags: [`${w.appName}:sha-1a9f4e`],
+          status: 'Running',
+          cpuPct: 2.8,
+          ramMb: w.presetKey === 'nextjs' ? 142 : 32,
+          ramLimitMb: 512,
+          ports: `127.0.0.1:${portNum}->${portNum}/tcp`,
+          uptime: 'Up vừa xong',
+          logs: [...w.deployLogs]
+        });
+        state.images.unshift({
+          id: `img-${Date.now()}`,
+          repoTag: `${w.appName}:sha-1a9f4e`,
+          stackKey: w.presetKey,
+          sizeMb: w.presetKey === 'nextjs' ? 145 : w.presetKey === 'go' ? 18 : 24,
+          inUse: true,
+          dangling: false,
+          created: 'Vừa xong',
+          history: ['sha-1a9f4e']
+        });
+        state.proxyRoutes.unshift({
+          id: `rt-${Date.now()}`,
+          domain: w.domain,
+          target: `dh-${w.appName}:${portNum}`,
+          pathRule: '/*',
+          ssl: true,
+          certExp: '90 ngày',
+          protocol: 'HTTP/2 + TLS 1.3'
+        });
+        syncVpsRamFromContainers();
+        renderHeader();
+      }
+    }
+
+    function openDeployedOnDashboard() {
+      syncNewlyDeployedProject();
+      state.stackFilter = 'Tất cả';
+      state.searchQuery = '';
+      setTab('dashboard');
+    }
+
+    // =========================================================================
+    // 8. TAB 3: QUẢN LÝ DOCKER (CONTAINERS & IMAGES)
+    // =========================================================================
+    function renderDocker(container) {
+      const isMob = state.viewport === 'mobile';
+      const danglingList = state.images.filter(i => i.dangling);
+      const reclaimableMb = danglingList.reduce((acc, i) => acc + i.sizeMb, 0);
+
+      container.innerHTML = `
+        <div class="space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-center gap-2.5">
+              <span class="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-500 flex items-center justify-center shrink-0">${dockerIconSvg('w-5 h-5')}</span>
+              <div>
+                <h1 class="text-base font-semibold text-[var(--foreground)]">Quản lý Docker (Containers &amp; Images)</h1>
+                <p class="text-xs text-[var(--muted-foreground)]">Điều khiển runtime qua Docker Engine API • 1-Click Rollback &amp; Dọn dẹp Image rác.</p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-1 p-1 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+              <button type="button" onclick="setDockerSubTab('containers')" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition ${state.dockerSubTab === 'containers' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
+                Containers (${state.containers.length})
+              </button>
+              <button type="button" onclick="setDockerSubTab('images')" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition ${state.dockerSubTab === 'images' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
+                Docker Images (${state.images.length})
+              </button>
+            </div>
+          </div>
+
+          ${state.dockerSubTab === 'containers' ? renderContainersSection(isMob) : renderImagesSection(isMob, danglingList, reclaimableMb)}
+        </div>
+      `;
+    }
+
+    function renderContainersSection(isMob) {
+      if (isMob) {
+        return `
+          <div class="space-y-2.5">
+            ${state.containers.map(c => {
+              const ramPct = Math.min(100, Math.round((c.ramMb / c.ramLimitMb) * 100));
+              const isRunning = c.status === 'Running';
+              return `
+                <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-2.5 shadow-sm">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="flex items-center gap-2 min-w-0">
+                      ${stackIconHtml(c.stackKey || 'nextjs', 'sm')}
+                      <div class="min-w-0">
+                        <div class="text-xs font-semibold font-mono text-[var(--foreground)] truncate">${esc(c.name)}</div>
+                        <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">${esc(c.image)}</div>
+                      </div>
+                    </div>
+                    ${statusBadgeHtml(c.status)}
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-2 text-xs">
+                    <div class="bg-[var(--content)] border border-[var(--border)] rounded-xl p-2">
+                      <div class="flex justify-between text-[var(--muted-foreground)]"><span>CPU</span><span class="font-mono text-[var(--foreground)]">${c.cpuPct}%</span></div>
+                      <div class="mt-1 h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                        <div class="h-full bg-sky-500 rounded-full" style="width:${Math.min(100, c.cpuPct * 3)}%"></div>
+                      </div>
+                    </div>
+                    <div class="bg-[var(--content)] border border-[var(--border)] rounded-xl p-2">
+                      <div class="flex justify-between text-[var(--muted-foreground)]"><span>RAM</span><span class="font-mono text-[var(--foreground)]">${c.ramMb}MB</span></div>
+                      <div class="mt-1 h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                        <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" style="width:${ramPct}%"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">Ports: ${esc(c.ports)}</div>
+
+                  <div class="grid grid-cols-4 gap-1.5 pt-1">
+                    <button type="button" onclick="toggleContainerPower('${esc(c.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium ${isRunning ? 'bg-rose-500/15 text-rose-500 border border-rose-500/30' : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'}">${isRunning ? 'Stop' : 'Start'}</button>
+                    <button type="button" onclick="restartContainer('${esc(c.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)]">Restart</button>
+                    <button type="button" onclick="openLogsModal('container', '${esc(c.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)]">Logs</button>
+                    <button type="button" onclick="openRollbackModal('${esc(c.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30">Rollback</button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      }
+
+      return `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="border-b border-[var(--border)] bg-[var(--sidebar)] text-xs text-[var(--muted-foreground)]">
+                  <th class="py-3 px-4 font-semibold">Container / Image</th>
+                  <th class="py-3 px-3 font-semibold">Trạng thái</th>
+                  <th class="py-3 px-3 font-semibold">CPU</th>
+                  <th class="py-3 px-3 font-semibold">RAM</th>
+                  <th class="py-3 px-3 font-semibold">Ports</th>
+                  <th class="py-3 px-4 font-semibold text-right">Hành động</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-[var(--border)] text-xs">
+                ${state.containers.map(c => {
+                  const isRunning = c.status === 'Running';
+                  const ramPct = Math.min(100, Math.round((c.ramMb / c.ramLimitMb) * 100));
+                  return `
+                    <tr class="hover:bg-[var(--content)]/60 transition">
+                      <td class="py-3 px-4">
+                        <div class="flex items-center gap-2.5">
+                          ${stackIconHtml(c.stackKey || 'nextjs', 'sm')}
+                          <div>
+                            <div class="font-semibold font-mono text-[var(--foreground)]">${esc(c.name)}</div>
+                            <div class="text-xs font-mono text-[var(--muted-foreground)]">${esc(c.image)} • ${esc(c.uptime)}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="py-3 px-3">${statusBadgeHtml(c.status)}</td>
+                      <td class="py-3 px-3 w-28">
+                        <div class="flex justify-between font-mono text-xs mb-1"><span>${c.cpuPct}%</span></div>
+                        <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                          <div class="h-full bg-sky-500 rounded-full" style="width:${Math.min(100, c.cpuPct * 3)}%"></div>
+                        </div>
+                      </td>
+                      <td class="py-3 px-3 w-36">
+                        <div class="flex justify-between font-mono text-xs mb-1"><span>${c.ramMb} / ${c.ramLimitMb} MB</span></div>
+                        <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                          <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" style="width:${ramPct}%"></div>
+                        </div>
+                      </td>
+                      <td class="py-3 px-3 font-mono text-[var(--muted-foreground)]">${esc(c.ports)}</td>
+                      <td class="py-3 px-4 text-right">
+                        <div class="inline-flex items-center gap-1.5">
+                          <button type="button" onclick="toggleContainerPower('${esc(c.id)}')" class="px-2.5 py-1 rounded-lg text-xs font-medium ${isRunning ? 'bg-rose-500/15 text-rose-500 border border-rose-500/30 hover:bg-rose-500/25' : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 hover:bg-emerald-500/25'}">${isRunning ? 'Stop' : 'Start'}</button>
+                          <button type="button" onclick="restartContainer('${esc(c.id)}')" class="px-2.5 py-1 rounded-lg text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Restart</button>
+                          <button type="button" onclick="openLogsModal('container', '${esc(c.id)}')" class="px-2.5 py-1 rounded-lg text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Xem Logs</button>
+                          <button type="button" onclick="openRollbackModal('${esc(c.id)}')" class="px-2.5 py-1 rounded-lg text-xs font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/25">Rollback</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderImagesSection(isMob, danglingList, reclaimableMb) {
+      const totalMb = state.images.reduce((acc, i) => acc + i.sizeMb, 0);
+      return `
+        <div class="space-y-3">
+          <!-- Prune Summary Bar -->
+          <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+            <div class="space-y-0.5">
+              <div class="text-xs font-semibold text-[var(--foreground)]">Tổng dung lượng Images: <span class="font-mono text-indigo-500">${(totalMb / 1024).toFixed(2)} GB</span></div>
+              <div class="text-xs text-[var(--muted-foreground)]">
+                ${danglingList.length ? `Phát hiện <strong class="text-amber-500">${danglingList.length} image rác (&lt;none&gt;)</strong> chiếm <strong class="font-mono">${reclaimableMb} MB</strong>.` : 'Hệ thống sạch sẽ, không còn dangling image rác.'}
+              </div>
+            </div>
+            <button type="button" ${danglingList.length === 0 ? 'disabled' : ''} onclick="pruneDanglingImages()" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition ${danglingList.length ? 'bg-amber-500/15 text-amber-500 border border-amber-500/40 ring-2 ring-amber-500/15 hover:bg-amber-500/25' : 'bg-[var(--content)] text-[var(--muted-foreground)] border border-[var(--border)] opacity-60'}">
+              Dọn dẹp Image rác (Docker Prune)
+            </button>
+          </div>
+
+          <!-- Image Cards -->
+          <div class="grid ${isMob ? 'grid-cols-1 gap-2.5' : 'grid-cols-1 md:grid-cols-2 gap-3'}">
+            ${state.images.map(img => `
+              <div class="rounded-2xl border ${img.dangling ? 'border-amber-500/35 bg-amber-500/5' : 'border-[var(--border)] bg-[var(--card)]'} p-3.5 flex flex-col justify-between gap-2.5 shadow-sm">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex items-center gap-2.5 min-w-0">
+                    ${stackIconHtml(img.stackKey || 'auto', 'sm')}
+                    <div class="min-w-0">
+                      <div class="text-xs font-semibold font-mono text-[var(--foreground)] truncate">${esc(img.repoTag)}</div>
+                      <div class="text-xs text-[var(--muted-foreground)] mt-0.5">${img.note ? esc(img.note) : `Tạo ${esc(img.created)}`}</div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span class="text-xs px-2 py-0.5 rounded-lg bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]">${img.sizeMb} MB</span>
+                    ${img.inUse
+                      ? `<span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 font-medium">In Use</span>`
+                      : `<span class="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-500 border border-amber-500/30 font-medium">Dangling</span>`
+                    }
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border)]">
+                  <div class="flex flex-wrap items-center gap-1 text-xs">
+                    <span class="text-[var(--muted-foreground)]">Tags:</span>
+                    ${img.history.map(t => `<span class="px-1.5 py-0.5 rounded-md bg-[var(--secondary)] text-[var(--secondary-foreground)] font-mono">${esc(t)}</span>`).join('')}
+                  </div>
+                  ${!img.inUse ? `<button type="button" onclick="removeSingleImage('${esc(img.id)}')" class="text-xs text-rose-500 hover:underline font-medium">Xóa</button>` : ''}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function applyLocalContainerAction(id, action, targetTag = '') {
+      const c = state.containers.find(item => item.id === id);
+      if (!c) return;
+      if (action === 'stop') {
+        c.status = 'Stopped';
+        c.cpuPct = 0;
+        c.ramMb = 0;
+        c.uptime = 'Stopped vừa xong';
+        c.logs.push('[docker] Container stopped by user');
+        showToast(`Đã dừng container ${c.name}`, 'warn');
+      } else if (action === 'start') {
+        c.status = 'Running';
+        c.cpuPct = 2.4;
+        c.ramMb = Math.min(c.ramLimitMb, 64);
+        c.uptime = 'Up vừa xong';
+        c.logs.push('[docker] Container started & passing healthcheck');
+        showToast(`Đã bật container ${c.name}`, 'success');
+      } else if (action === 'restart') {
+        c.status = 'Restarting...';
+        renderMainView();
+        setTimeout(() => {
+          c.status = 'Running';
+          c.cpuPct = Number((Math.random() * 4 + 1.5).toFixed(1));
+          if (c.ramMb === 0) c.ramMb = 48;
+          c.uptime = 'Up vừa restart';
+          c.logs.push('[docker] Container restarted cleanly');
+          syncVpsRamFromContainers();
+          renderHeader();
+          if (state.activeTab === 'docker') renderMainView();
+          showToast(`Restart ${c.name} hoàn tất!`, 'success');
+        }, 850);
+        return;
+      } else if (action === 'rollback' && targetTag) {
+        const oldTag = c.image;
+        c.image = targetTag;
+        if (!c.previousTags.includes(oldTag)) c.previousTags.unshift(oldTag);
+        c.status = 'Running';
+        c.uptime = 'Up (Rollback vừa xong)';
+        c.logs.push(`[rollback] Switched image ${oldTag} -> ${targetTag} (zero-downtime)`);
+        closeModal();
+        showToast(`Đã rollback ${c.name} về ${targetTag}!`, 'success');
+      }
+
+      const siblingCnts = state.containers.filter(x => x.project === c.project);
+      const anyRunning = siblingCnts.some(x => x.status === 'Running');
+      const proj = state.projects.find(p => p.name === c.project);
+      if (proj) {
+        proj.status = anyRunning ? 'Running' : 'Stopped';
+        proj.ramMb = siblingCnts.reduce((s, x) => s + x.ramMb, 0);
+        proj.cpu = Number(siblingCnts.reduce((s, x) => s + x.cpuPct, 0).toFixed(1));
+      }
+      syncVpsRamFromContainers();
+      renderHeader();
+      renderMainView();
+    }
+
+    async function containerAction(id, action, targetTag = '') {
+      const c = state.containers.find(item => item.id === id);
+      if (!c) return;
+
+      if (canUseBackend()) {
+        try {
+          await apiFetch(`/containers/${encodeURIComponent(id)}/action`, {
+            method: 'POST',
+            body: JSON.stringify({ action, targetTag })
+          });
+          if (action === 'rollback') closeModal();
+          await refreshOverview();
+          renderAll();
+          const msgMap = {
+            stop: `Đã dừng container ${c.name}`,
+            start: `Đã bật container ${c.name}`,
+            restart: `Restart ${c.name} hoàn tất!`,
+            rollback: `Đã rollback ${c.name} về ${targetTag}!`
+          };
+          showToast(msgMap[action] || `Thao tác ${action} hoàn tất`, action === 'stop' ? 'warn' : 'success');
+          return;
+        } catch (err) {
+          // Graceful local fallback when API unreachable
+        }
+      }
+
+      applyLocalContainerAction(id, action, targetTag);
+    }
+
+    function toggleContainerPower(id) {
+      const c = state.containers.find(item => item.id === id);
+      if (!c) return;
+      return containerAction(id, c.status === 'Running' ? 'stop' : 'start');
+    }
+
+    function restartContainer(id) {
+      return containerAction(id, 'restart');
+    }
+
+    async function pruneDanglingImages() {
+      const dangling = state.images.filter(i => i.dangling);
+      if (!dangling.length) return;
+
+      if (canUseBackend()) {
+        try {
+          const res = await apiFetch('/images/prune', { method: 'POST' });
+          await refreshOverview();
+          renderHeader();
+          renderMainView();
+          const freedMb = res.reclaimedMb || dangling.reduce((s, i) => s + i.sizeMb, 0);
+          showToast(`Docker Prune: Đã giải phóng ${(freedMb / 1024).toFixed(2)} GB (${freedMb} MB)!`, 'success');
+          return;
+        } catch (err) {
+          // Fallback to local prune
+        }
+      }
+
+      const freedMb = dangling.reduce((s, i) => s + i.sizeMb, 0);
+      state.images = state.images.filter(i => !i.dangling);
+      state.vps.diskPct = Math.max(18, state.vps.diskPct - 15);
+      renderHeader();
+      renderMainView();
+      showToast(`Docker Prune: Đã giải phóng ${(freedMb / 1024).toFixed(2)} GB (${freedMb} MB)!`, 'success');
+    }
+
+    function removeSingleImage(id) {
+      const img = state.images.find(i => i.id === id);
+      if (!img) return;
+      state.images = state.images.filter(i => i.id !== id);
+      state.vps.diskPct = Math.max(18, state.vps.diskPct - 7);
+      renderHeader();
+      renderMainView();
+      showToast(`Đã xóa image ${img.repoTag} (${img.sizeMb} MB)`, 'success');
+    }
+
+    // =========================================================================
+    // 9. TAB 4: VPS & REVERSE PROXY (DOMAINS & SSL)
+    // =========================================================================
+    function renderProxy(container) {
+      const isMob = state.viewport === 'mobile';
+      const v = state.vps;
+
+      container.innerHTML = `
+        <div class="space-y-4">
+          <div class="flex items-center gap-2.5">
+            <span class="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-500 flex items-center justify-center shrink-0">${traefikIconSvg('w-5 h-5')}</span>
+            <div>
+              <h1 class="text-base font-semibold text-[var(--foreground)]">VPS &amp; Reverse Proxy (Domains &amp; SSL)</h1>
+              <p class="text-xs text-[var(--muted-foreground)]">Định tuyến Traefik Auto-HTTPS, Webhook Auto-Deploy và kết nối VPS Docker Socket.</p>
+            </div>
+          </div>
+
+          <!-- Domain Routing Table / Cards -->
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
+            <div class="px-4 py-3 border-b border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+              <div class="text-xs font-semibold text-[var(--foreground)]">Domain Routing &amp; Auto Let's Encrypt HTTPS</div>
+              <span class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-medium">Traefik ACME Active</span>
+            </div>
+
+            ${isMob ? `
+              <div class="divide-y divide-[var(--border)]">
+                ${state.proxyRoutes.map(rt => `
+                  <div class="p-3.5 space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-xs font-mono font-semibold text-sky-500">${esc(rt.domain)}</span>
+                      <button type="button" onclick="toggleRouteSsl('${esc(rt.id)}')" class="px-2.5 py-1 rounded-full text-xs font-medium border transition ${rt.ssl ? 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30 ring-2 ring-emerald-500/15' : 'bg-[var(--content)] text-[var(--muted-foreground)] border-[var(--border)]'}">
+                        ${rt.ssl ? 'HTTPS ON' : 'HTTPS OFF'}
+                      </button>
+                    </div>
+                    <div class="text-xs font-mono text-[var(--muted-foreground)]">→ ${esc(rt.target)}</div>
+                    <div class="flex justify-between text-xs text-[var(--muted-foreground)]">
+                      <span>${esc(rt.protocol)}</span>
+                      <span>Cert: ${esc(rt.certExp)}</span>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : `
+              <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                  <thead>
+                    <tr class="border-b border-[var(--border)] bg-[var(--sidebar)] text-xs text-[var(--muted-foreground)]">
+                      <th class="py-3 px-4 font-semibold">Domain</th>
+                      <th class="py-3 px-3 font-semibold">Target Container / Upstream</th>
+                      <th class="py-3 px-3 font-semibold">Path Rule</th>
+                      <th class="py-3 px-3 font-semibold">SSL / TLS</th>
+                      <th class="py-3 px-4 font-semibold text-right">Auto Let's Encrypt</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-[var(--border)] text-xs">
+                    ${state.proxyRoutes.map(rt => `
+                      <tr class="hover:bg-[var(--content)]/60">
+                        <td class="py-3 px-4 font-mono font-semibold text-sky-500">${esc(rt.domain)}</td>
+                        <td class="py-3 px-3 font-mono text-[var(--foreground)]">${esc(rt.target)}</td>
+                        <td class="py-3 px-3 font-mono text-[var(--muted-foreground)]">${esc(rt.pathRule)}</td>
+                        <td class="py-3 px-3">
+                          <span class="px-2 py-0.5 rounded-full text-xs font-medium ${rt.ssl ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30' : 'bg-amber-500/15 text-amber-500 border border-amber-500/30'}">
+                            ${esc(rt.protocol)} (${esc(rt.certExp)})
+                          </span>
+                        </td>
+                        <td class="py-3 px-4 text-right">
+                          <button type="button" onclick="toggleRouteSsl('${esc(rt.id)}')" class="px-3 py-1 rounded-full text-xs font-semibold border transition ${rt.ssl ? 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30 ring-2 ring-emerald-500/15' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)]'}">
+                            ${rt.ssl ? 'Auto-HTTPS: BẬT' : 'Auto-HTTPS: TẮT'}
+                          </button>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            `}
+          </div>
+
+          <!-- Webhook & SSH/Docker Socket Settings -->
+          <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-4">
+            <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-4 space-y-3 shadow-sm">
+              <div class="flex items-center gap-2 text-xs font-semibold text-[var(--foreground)]">
+                ${githubIconSvg('w-4 h-4')}
+                <span>Webhook Auto-Deploy URL (GitHub Push)</span>
+              </div>
+              <p class="text-xs text-[var(--muted-foreground)]">Dán URL này vào GitHub Repo Settings → Webhooks hoặc để OAuth App tự cấu hình.</p>
+              <div class="flex gap-2">
+                <input type="text" readonly value="${esc(state.webhookUrl)}" class="flex-1 px-3 py-2 rounded-xl bg-[var(--card)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                <button type="button" onclick="copyWebhookUrl()" class="px-3 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shrink-0 shadow-sm">Copy URL</button>
+              </div>
+              <div class="flex items-center justify-between pt-1 text-xs">
+                <span class="text-[var(--muted-foreground)]">Signature: <code class="font-mono text-[var(--foreground)]">X-Hub-Signature-256</code></span>
+                <button type="button" onclick="regenWebhook()" class="text-indigo-500 hover:underline font-medium">Đổi Secret URL</button>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3 shadow-sm">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-semibold text-[var(--foreground)]">Kết nối VPS &amp; Docker Socket</span>
+                <span class="text-xs text-emerald-500 font-medium">${esc(v.connStatus)}</span>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label class="block text-xs text-[var(--muted-foreground)] mb-1">VPS Host / IP</label>
+                  <input type="text" value="${esc(v.ip)}" oninput="state.vps.ip = this.value" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+                <div>
+                  <label class="block text-xs text-[var(--muted-foreground)] mb-1">SSH User &amp; Port</label>
+                  <input type="text" value="${esc(v.sshUser)}:${esc(v.sshPort)}" readonly class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs text-[var(--muted-foreground)] mb-1">Chế độ Docker Engine</label>
+                <select onchange="state.vps.connMode = this.value; state.vps.socketEndpoint = this.value === 'socket-proxy' ? 'tcp://docker-proxy:2375' : this.value === 'ssh-tunnel' ? 'ssh://deploy@103.184.210.12' : '/var/run/docker.sock'; renderMainView();" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)]">
+                  <option value="socket-proxy" ${v.connMode === 'socket-proxy' ? 'selected' : ''}>Docker Socket Proxy (Bảo mật khuyến nghị)</option>
+                  <option value="ssh-tunnel" ${v.connMode === 'ssh-tunnel' ? 'selected' : ''}>Remote VPS qua SSH Tunnel (ED25519)</option>
+                  <option value="local-sock" ${v.connMode === 'local-sock' ? 'selected' : ''}>Local /var/run/docker.sock</option>
+                </select>
+              </div>
+
+              <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <code class="text-xs font-mono text-[var(--muted-foreground)] truncate">${esc(v.socketEndpoint)}</code>
+                <div class="flex items-center gap-2">
+                  <button type="button" onclick="testVpsConnection()" class="px-3 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">Test Kết nối</button>
+                  <button type="button" onclick="saveVpsConfig()" class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm">Lưu</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function toggleProxySsl(id) {
+      const rt = state.proxyRoutes.find(r => r.id === id);
+      if (!rt) return;
+
+      if (canUseBackend()) {
+        try {
+          const updated = await apiFetch(`/proxy/routes/${encodeURIComponent(id)}/toggle-ssl`, { method: 'POST' });
+          await refreshOverview();
+          renderWorkspace();
+          const isSsl = updated && typeof updated.ssl === 'boolean' ? updated.ssl : !rt.ssl;
+          showToast(isSsl ? `Đã bật Auto Let's Encrypt HTTPS cho ${rt.domain}` : `Đã tắt HTTPS cho ${rt.domain}`, isSsl ? 'success' : 'warn');
+          return;
+        } catch (err) {
+          // Graceful local fallback
+        }
+      }
+
+      rt.ssl = !rt.ssl;
+      rt.protocol = rt.ssl ? 'HTTP/2 + TLS 1.3' : 'HTTP Only';
+      rt.certExp = rt.ssl ? '90 ngày' : 'Chưa cấp';
+      renderWorkspace();
+      showToast(rt.ssl ? `Đã bật Auto Let's Encrypt HTTPS cho ${rt.domain}` : `Đã tắt HTTPS cho ${rt.domain}`, rt.ssl ? 'success' : 'warn');
+    }
+
+    function toggleRouteSsl(id) {
+      return toggleProxySsl(id);
+    }
+
+    function copyWebhookUrl() {
+      if (navigator.clipboard) navigator.clipboard.writeText(state.webhookUrl).catch(() => {});
+      showToast('Đã sao chép Webhook Auto-Deploy URL!', 'success');
+    }
+
+    function regenWebhook() {
+      const token = Math.random().toString(16).slice(2, 10);
+      state.webhookUrl = `https://hub.anna.dev/api/webhooks/github/wh_${token}`;
+      renderMainView();
+      showToast('Đã tạo mới Webhook Secret URL!', 'info');
+    }
+
+    function testVpsConnection() {
+      const ping = Math.floor(Math.random() * 12) + 8;
+      state.vps.connStatus = `Connected • ${ping}ms`;
+      renderMainView();
+      showToast(`Ping Docker Engine (${state.vps.socketEndpoint}) thành công (${ping}ms)!`, 'success');
+    }
+
+    function saveVpsConfig() {
+      showToast(`Đã lưu cấu hình kết nối VPS ${state.vps.ip}`, 'success');
+    }
+
+    // =========================================================================
+    // 10. MODALS: MACOS LOGS DRAWER & ROLLBACK PICKER
+    // =========================================================================
+    function openLogsModal(kind, id) {
+      state.modal = { open: true, type: 'logs', targetKind: kind, targetId: id, logFilter: '' };
+      renderModal();
+    }
+
+    function openRollbackModal(containerId) {
+      state.modal = { open: true, type: 'rollback', targetKind: 'container', targetId: containerId, logFilter: '' };
+      renderModal();
+    }
+
+    function closeModal() {
+      state.modal.open = false;
+      renderModal();
+    }
+
+    function renderModal() {
+      const root = document.getElementById('modalRoot');
+      if (!root) return;
+      if (!state.modal.open) {
+        root.innerHTML = '';
+        return;
+      }
+
+      const isMob = state.viewport === 'mobile';
+      const wrapperCls = isMob
+        ? 'absolute inset-0 z-40 bg-[var(--background)]/80 backdrop-blur-sm flex items-end p-2.5'
+        : 'fixed inset-0 z-40 bg-[var(--background)]/75 backdrop-blur-sm flex items-center justify-center p-4';
+
+      if (state.modal.type === 'logs') {
+        const entity = state.modal.targetKind === 'project'
+          ? state.projects.find(p => p.id === state.modal.targetId)
+          : state.containers.find(c => c.id === state.modal.targetId);
+        if (!entity) { root.innerHTML = ''; return; }
+
+        root.innerHTML = `
+          <div class="${wrapperCls}" onclick="if(event.target===this) closeModal()">
+            <div class="w-full ${isMob ? 'max-h-[82%]' : 'max-w-2xl'} rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl flex flex-col overflow-hidden">
+              <div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--content)] flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2.5 min-w-0">
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
+                    <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
+                    <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
+                  </div>
+                  <div class="text-xs font-semibold font-mono text-[var(--foreground)] truncate">Live Logs: ${esc(entity.name)}</div>
+                </div>
+                <button type="button" onclick="closeModal()" class="px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">Đóng</button>
+              </div>
+              <div class="p-3 border-b border-[var(--border)] flex items-center gap-2">
+                <input type="text" value="${esc(state.modal.logFilter)}" oninput="filterModalLogs(this.value)" placeholder="Lọc dòng log..." class="flex-1 px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)]" />
+                <button type="button" onclick="appendLiveLogLine()" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm">+ Stream Log</button>
+              </div>
+              <div id="modalLogLines" class="p-3.5 bg-[var(--sidebar)] font-mono text-xs space-y-1.5 overflow-y-auto thin-scroll max-h-[340px] text-[var(--foreground)]"></div>
+            </div>
+          </div>
+        `;
+        renderModalLogLines();
+      } else if (state.modal.type === 'rollback') {
+        const cnt = state.containers.find(c => c.id === state.modal.targetId);
+        if (!cnt) { root.innerHTML = ''; return; }
+        root.innerHTML = `
+          <div class="${wrapperCls}" onclick="if(event.target===this) closeModal()">
+            <div class="w-full ${isMob ? '' : 'max-w-md'} rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl overflow-hidden">
+              <div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--sidebar)] flex items-center justify-between">
+                <span class="text-xs font-semibold text-[var(--foreground)]">1-Click Rollback Container</span>
+                <button type="button" onclick="closeModal()" class="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]">Đóng</button>
+              </div>
+              <div class="p-4 space-y-3">
+                <div class="text-xs text-[var(--muted-foreground)]">
+                  Container: <strong class="font-mono text-[var(--foreground)]">${esc(cnt.name)}</strong><br/>
+                  Image hiện tại: <code class="font-mono text-emerald-500">${esc(cnt.image)}</code>
+                </div>
+                <div class="space-y-1.5">
+                  <div class="text-xs font-medium text-[var(--foreground)]">Chọn phiên bản Image ổn định trước đó:</div>
+                  ${cnt.previousTags.map(tag => `
+                    <button type="button" onclick="executeRollback('${esc(cnt.id)}', '${esc(tag)}')" class="w-full flex items-center justify-between px-3 py-2.5 rounded-xl border border-[var(--border)] bg-[var(--content)] hover:border-indigo-500 hover:bg-[var(--accent)] text-xs font-mono text-[var(--foreground)] transition">
+                      <span>${esc(tag)}</span>
+                      <span class="text-amber-500 font-sans font-semibold">Khôi phục →</span>
+                    </button>
+                  `).join('')}
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function filterModalLogs(val) {
+      state.modal.logFilter = val;
+      renderModalLogLines();
+    }
+
+    function renderModalLogLines() {
+      const box = document.getElementById('modalLogLines');
+      if (!box) return;
+      const entity = state.modal.targetKind === 'project'
+        ? state.projects.find(p => p.id === state.modal.targetId)
+        : state.containers.find(c => c.id === state.modal.targetId);
+      if (!entity) return;
+      const q = state.modal.logFilter.trim().toLowerCase();
+      const lines = entity.logs.filter(l => !q || l.toLowerCase().includes(q));
+      box.innerHTML = lines.length
+        ? lines.map(l => `<div class="leading-relaxed break-all">${highlightTerminalLineHtml(l)}</div>`).join('')
+        : '<div class="text-[var(--muted-foreground)]">Không có dòng log nào khớp bộ lọc.</div>';
+    }
+
+    function appendLiveLogLine() {
+      const entity = state.modal.targetKind === 'project'
+        ? state.projects.find(p => p.id === state.modal.targetId)
+        : state.containers.find(c => c.id === state.modal.targetId);
+      if (!entity) return;
+      const ts = new Date().toISOString().slice(11, 19);
+      entity.logs.push(`${ts}Z [http] GET /health 200 OK (${Math.floor(Math.random()*5)+1}ms)`);
+      renderModalLogLines();
+    }
+
+    function executeRollback(containerId, targetTag) {
+      return containerAction(containerId, 'rollback', targetTag);
+    }
+
+    // =========================================================================
+    // 11. BOOTSTRAP
+    // =========================================================================
+    function renderAll() {
+      renderHeader();
+      renderWorkspace();
+    }
+
+    renderAll();
+    initApp();
+  </script>
+</body>
+</html>
