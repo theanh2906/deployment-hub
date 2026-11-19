@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,10 +35,12 @@ type apiServer struct {
 	auth           *auth.Manager
 	webhookSecret  string
 	webFS          fs.FS
-	authConfigBusy atomic.Bool
-	cfConnectBusy  atomic.Bool
-	cfWildcardBusy atomic.Bool
-	cfHubBusy      atomic.Bool
+	authConfigBusy     atomic.Bool
+	cfConnectBusy      atomic.Bool
+	cfWildcardBusy     atomic.Bool
+	cfHubBusy          atomic.Bool
+	imagePruneBusy     atomic.Bool
+	buildCachePruneBusy atomic.Bool
 }
 
 // New constructs the DeploymentHub HTTP handler wiring all REST, SSE, webhook,
@@ -94,9 +97,20 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	mux.HandleFunc("POST /api/v1/deployments", s.handleStartDeployment)
 	mux.HandleFunc("GET /api/v1/deployments/{id}", s.handleGetDeployment)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/stream", s.handleStreamDeployment)
+	mux.HandleFunc("GET /api/v1/docker/df", s.handleDockerDiskUsage)
+	mux.HandleFunc("GET /api/v1/containers/stats", s.handleAllContainerStats)
 	mux.HandleFunc("POST /api/v1/containers/{id}/action", s.handleContainerAction)
+	mux.HandleFunc("GET /api/v1/containers/{id}/inspect", s.handleInspectContainer)
+	mux.HandleFunc("GET /api/v1/containers/{id}/stats", s.handleContainerStats)
+	mux.HandleFunc("GET /api/v1/containers/{id}/top", s.handleContainerTop)
+	mux.HandleFunc("POST /api/v1/containers/{id}/update", s.handleUpdateContainerResources)
 	mux.HandleFunc("GET /api/v1/containers/{id}/logs", s.handleGetContainerLogs)
+	mux.HandleFunc("GET /api/v1/containers/{id}/logs/stream", s.handleStreamContainerLogs)
+	mux.HandleFunc("GET /api/v1/containers/{id}/logs/download", s.handleDownloadContainerLogs)
 	mux.HandleFunc("POST /api/v1/images/prune", s.handlePruneImages)
+	mux.HandleFunc("DELETE /api/v1/images/{id}", s.handleDeleteImage)
+	mux.HandleFunc("GET /api/v1/images/{id}/history", s.handleImageHistory)
+	mux.HandleFunc("POST /api/v1/build-cache/prune", s.handlePruneBuildCache)
 	mux.HandleFunc("POST /api/v1/proxy/routes/{id}/toggle-ssl", s.handleToggleProxySSL)
 	mux.HandleFunc("POST /api/v1/mock/clean", s.handleClearMockData)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.handleGitHubWebhook)
@@ -886,13 +900,14 @@ func (s *apiServer) handleStreamDeployment(w http.ResponseWriter, r *http.Reques
 func (s *apiServer) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		Action    string `json:"action"`
-		TargetTag string `json:"targetTag"`
+		Action        string `json:"action"`
+		TargetTag     string `json:"targetTag"`
+		RemoveVolumes bool   `json:"removeVolumes"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	c, err := s.engine.ContainerAction(id, req.Action, req.TargetTag)
+	c, err := s.engine.ContainerActionWithOptions(id, req.Action, req.TargetTag, req.RemoveVolumes)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -900,9 +915,81 @@ func (s *apiServer) handleContainerAction(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, c)
 }
 
+func (s *apiServer) handleDockerDiskUsage(w http.ResponseWriter, r *http.Request) {
+	df, err := s.engine.GetSystemDiskUsage()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, df)
+}
+
+func (s *apiServer) handleAllContainerStats(w http.ResponseWriter, r *http.Request) {
+	stats := s.engine.GetAllRunningContainerStats()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stats": stats,
+	})
+}
+
+func (s *apiServer) handleInspectContainer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	info, err := s.engine.InspectContainer(id)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *apiServer) handleContainerStats(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	st, err := s.engine.GetContainerStats(id)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *apiServer) handleContainerTop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	top, err := s.engine.GetContainerTop(id)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, top)
+}
+
+func (s *apiServer) handleUpdateContainerResources(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		MemoryMb      int64   `json:"memoryMb"`
+		CPUCores      float64 `json:"cpuCores"`
+		RestartPolicy string  `json:"restartPolicy"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.engine.UpdateContainerResources(id, req.MemoryMb, req.CPUCores, req.RestartPolicy); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "updated",
+		"id":     id,
+	})
+}
+
 func (s *apiServer) handleGetContainerLogs(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	logs, err := s.engine.GetContainerLogs(id, 100)
+	tail := 100
+	if rawTail := strings.TrimSpace(r.URL.Query().Get("tail")); rawTail != "" {
+		if n, err := strconv.Atoi(rawTail); err == nil && n > 0 && n <= 2000 {
+			tail = n
+		}
+	}
+	logs, err := s.engine.GetContainerLogs(id, tail)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -913,8 +1000,199 @@ func (s *apiServer) handleGetContainerLogs(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+func (s *apiServer) handleStreamContainerLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	tail := 200
+	if rawTail := strings.TrimSpace(r.URL.Query().Get("tail")); rawTail != "" {
+		if n, err := strconv.Atoi(rawTail); err == nil && n > 0 && n <= 2000 {
+			tail = n
+		}
+	}
+	timestamps := r.URL.Query().Get("timestamps") == "1" || strings.EqualFold(r.URL.Query().Get("timestamps"), "true")
+
+	// Validate target exists before committing streaming headers.
+	if _, err := s.engine.InspectContainer(id); err != nil {
+		// In minimal mocks without inspect, verify container exists in engine overview logs.
+		if _, logErr := s.engine.GetContainerLogs(id, 1); logErr != nil {
+			writeEngineError(w, err)
+			return
+		}
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	type logMsg struct {
+		Stream string `json:"stream"`
+		Line   string `json:"line"`
+	}
+	msgCh := make(chan logMsg, 128)
+	doneCh := make(chan error, 1)
+
+	go func() {
+		defer close(doneCh)
+		err := s.engine.StreamContainerLogs(r.Context(), id, tail, timestamps, func(stream, line string) bool {
+			select {
+			case msgCh <- logMsg{Stream: stream, Line: line}:
+				return true
+			case <-r.Context().Done():
+				return false
+			}
+		})
+		doneCh <- err
+	}()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	writeLogEvent := func(msg logMsg) bool {
+		payload, err := json.Marshal(msg)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "event: log\ndata: %s\n\n", payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg := <-msgCh:
+			if !writeLogEvent(msg) {
+				return
+			}
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case streamErr := <-doneCh:
+			// Drain any buffered log lines queued before EOF/error.
+			for {
+				select {
+				case msg := <-msgCh:
+					if !writeLogEvent(msg) {
+						return
+					}
+				default:
+					if streamErr != nil && r.Context().Err() == nil {
+						errPayload, _ := json.Marshal(map[string]string{"error": streamErr.Error()})
+						_, _ = fmt.Fprintf(w, "event: stream_error\ndata: %s\n\n", errPayload)
+						flusher.Flush()
+					}
+					_, _ = io.WriteString(w, "event: end\ndata: {\"done\":true}\n\n")
+					flusher.Flush()
+					return
+				}
+			}
+		}
+	}
+}
+
+func (s *apiServer) handleDownloadContainerLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	tail := 1000
+	if rawTail := strings.TrimSpace(r.URL.Query().Get("tail")); rawTail != "" {
+		if n, err := strconv.Atoi(rawTail); err == nil && n > 0 && n <= 5000 {
+			tail = n
+		}
+	}
+	timestamps := r.URL.Query().Get("timestamps") != "0"
+	cname, text, err := s.engine.DownloadContainerLogs(r.Context(), id, tail, timestamps)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, cname)
+	if safeName == "" {
+		safeName = "container"
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.log"`, safeName))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, text)
+}
+
 func (s *apiServer) handlePruneImages(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.PruneDanglingImages())
+	if !s.imagePruneBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang dọn dẹp Docker Images, vui lòng đợi...")
+		return
+	}
+	defer s.imagePruneBusy.Store(false)
+
+	var req struct {
+		All bool `json:"all"`
+	}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.engine.PruneImages(req.All))
+}
+
+func (s *apiServer) handleDeleteImage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	force := r.URL.Query().Get("force") == "1" || strings.EqualFold(r.URL.Query().Get("force"), "true")
+	if err := s.engine.RemoveImage(id, force); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted",
+		"id":     id,
+	})
+}
+
+func (s *apiServer) handleImageHistory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	layers, err := s.engine.GetImageHistory(id)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     id,
+		"layers": layers,
+	})
+}
+
+func (s *apiServer) handlePruneBuildCache(w http.ResponseWriter, r *http.Request) {
+	if !s.buildCachePruneBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang dọn Build Cache, vui lòng đợi...")
+		return
+	}
+	defer s.buildCachePruneBusy.Store(false)
+
+	var req struct {
+		All bool `json:"all"`
+	}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	res, err := s.engine.PruneBuildCache(req.All)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *apiServer) handleToggleProxySSL(w http.ResponseWriter, r *http.Request) {
@@ -1422,7 +1700,9 @@ func writeMahError(w http.ResponseWriter, err error) {
 
 func writeEngineError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
+	if errors.Is(err, docker.ErrProtectedContainer) {
+		status = http.StatusForbidden
+	} else if strings.Contains(strings.ToLower(err.Error()), "not found") {
 		status = http.StatusNotFound
 	}
 	writeError(w, status, err.Error())

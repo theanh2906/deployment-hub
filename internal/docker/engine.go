@@ -78,12 +78,40 @@ type Container struct {
 	Image        string   `json:"image"`
 	PreviousTags []string `json:"previousTags"`
 	Status       string   `json:"status"`
+	Protected    bool     `json:"protected"`
 	CPUPct       float64  `json:"cpuPct"`
 	RAMMb        int      `json:"ramMb"`
 	RAMLimitMb   int      `json:"ramLimitMb"`
 	Ports        string   `json:"ports"`
 	Uptime       string   `json:"uptime"`
 	Logs         []string `json:"logs"`
+}
+
+// ErrProtectedContainer is returned when a caller attempts a destructive action
+// on a core DeploymentHub infrastructure container, volume, network, or stack.
+var ErrProtectedContainer = errors.New("protected system resource")
+
+// IsProtectedSystemContainer reports whether name identifies one of DeploymentHub's
+// core runtime containers that must be guarded from destructive lifecycle operations.
+func IsProtectedSystemContainer(name string) bool {
+	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "/"))
+	switch clean {
+	case "deploymenthub-control-plane", "deploymenthub-traefik", "deploymenthub-socket-proxy":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProtectedActionAllowed(name, action string) bool {
+	if !IsProtectedSystemContainer(name) {
+		return true
+	}
+	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "/"))
+	if clean == "deploymenthub-traefik" && action == "restart" {
+		return true
+	}
+	return action == "start"
 }
 
 // DockerImage represents a local Docker image or dangling build layer.
@@ -533,12 +561,17 @@ func (e *Engine) RestartProject(id string) (Project, error) {
 	return cloneProject(*p), nil
 }
 
-// ContainerAction executes start, stop, restart, or rollback on a container
-// and synchronizes its parent project and VPS RAM usage.
+// ContainerAction executes start, stop, restart, pause, unpause, kill, remove, or rollback
+// on a container and synchronizes its parent project and VPS RAM usage.
 func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error) {
+	return e.ContainerActionWithOptions(id, action, targetTag, false)
+}
+
+// ContainerActionWithOptions executes container lifecycle actions with optional volume removal.
+func (e *Engine) ContainerActionWithOptions(id, action, targetTag string, removeVolumes bool) (Container, error) {
 	act := strings.ToLower(strings.TrimSpace(action))
 	switch act {
-	case "stop", "start", "restart", "rollback":
+	case "stop", "start", "restart", "pause", "unpause", "kill", "remove", "rollback":
 	default:
 		return Container{}, fmt.Errorf("unsupported container action %q", action)
 	}
@@ -550,12 +583,75 @@ func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error
 		return Container{}, fmt.Errorf("container %q not found", id)
 	}
 	dockerID := e.containers[idx].ID
+	cname := e.containers[idx].Name
+	prevImage := e.containers[idx].Image
+	prevTags := slices.Clone(e.containers[idx].PreviousTags)
 	runtimeMode := e.vps.RuntimeMode
 	endpoint := e.vps.SocketEndpoint
 	e.mu.RUnlock()
 
-	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" && (act == "start" || act == "stop" || act == "restart") {
-		sendDockerContainerAction(endpoint, dockerID, act)
+	if !isProtectedActionAllowed(cname, act) {
+		return Container{}, fmt.Errorf("%w: system container %q cannot be modified with action %q", ErrProtectedContainer, cname, act)
+	}
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
+		switch act {
+		case "start", "stop", "restart", "pause", "unpause", "kill":
+			if err := sendDockerContainerActionStrict(endpoint, dockerID, act); err != nil {
+				return Container{}, err
+			}
+			if act == "pause" || act == "unpause" || act == "kill" {
+				e.SyncDockerEngine()
+				e.mu.RLock()
+				if updatedIdx := e.findContainerIndexLocked(dockerID); updatedIdx >= 0 {
+					res := cloneContainer(e.containers[updatedIdx])
+					e.mu.RUnlock()
+					return res, nil
+				}
+				e.mu.RUnlock()
+			}
+		case "remove":
+			if err := removeDockerContainerByID(endpoint, dockerID, removeVolumes); err != nil {
+				return Container{}, err
+			}
+			e.mu.Lock()
+			if rmIdx := e.findContainerIndexLocked(dockerID); rmIdx >= 0 {
+				removed := cloneContainer(e.containers[rmIdx])
+				removed.Status = "Removed"
+				e.containers = append(e.containers[:rmIdx], e.containers[rmIdx+1:]...)
+				e.syncProjectFromContainersLocked(removed.Project)
+				e.syncVPSRamLocked()
+				e.mu.Unlock()
+				e.SyncDockerEngine()
+				return removed, nil
+			}
+			e.mu.Unlock()
+			e.SyncDockerEngine()
+			return Container{ID: dockerID, Name: cname, Status: "Removed"}, nil
+		case "rollback":
+			tag := strings.TrimSpace(targetTag)
+			if tag == "" {
+				for _, pt := range prevTags {
+					if pt != "" && pt != prevImage {
+						tag = pt
+						break
+					}
+				}
+				if tag == "" && len(prevTags) > 0 {
+					tag = prevTags[0]
+				}
+			}
+			if tag == "" {
+				return Container{}, errors.New("no previous image tag available for rollback")
+			}
+			newContainer, handled, err := e.rollbackDockerContainer(endpoint, dockerID, tag)
+			if err != nil {
+				return Container{}, err
+			}
+			if handled {
+				return newContainer, nil
+			}
+		}
 	}
 
 	e.mu.Lock()
@@ -575,6 +671,35 @@ func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error
 		c.RAMMb = 0
 		c.Uptime = "Stopped vừa xong"
 		c.Logs = append(c.Logs, "[docker] Container stopped by user")
+
+	case "kill":
+		c.Status = "Stopped"
+		c.CPUPct = 0
+		c.RAMMb = 0
+		c.Uptime = "Killed vừa xong"
+		c.Logs = append(c.Logs, "[docker] Container killed (SIGKILL)")
+
+	case "pause":
+		c.Status = "Paused"
+		c.CPUPct = 0
+		c.Uptime = "Paused"
+		c.Logs = append(c.Logs, "[docker] Container paused")
+
+	case "unpause":
+		c.Status = "Running"
+		if c.RAMMb == 0 {
+			c.RAMMb = min(c.RAMLimitMb, 64)
+		}
+		c.Uptime = "Up (Unpaused)"
+		c.Logs = append(c.Logs, "[docker] Container unpaused")
+
+	case "remove":
+		removed := cloneContainer(*c)
+		removed.Status = "Removed"
+		e.containers = append(e.containers[:idx], e.containers[idx+1:]...)
+		e.syncProjectFromContainersLocked(removed.Project)
+		e.syncVPSRamLocked()
+		return removed, nil
 
 	case "start":
 		c.Status = "Running"
@@ -1610,6 +1735,7 @@ func (e *Engine) SyncDockerEngine() {
 	e.applyDiscoveredContainersLocked(apiContainers, logsByID)
 	if hasImages {
 		e.applyDiscoveredImagesLocked(apiImages)
+		e.enrichContainerPreviousTagsLocked(apiImages)
 	}
 	e.syncVPSRamLocked()
 }
@@ -1705,10 +1831,7 @@ func (e *Engine) applyDiscoveredContainersLocked(apiContainers []dockerAPIContai
 			projName = cname
 		}
 
-		status := "Stopped"
-		if strings.EqualFold(dc.State, "running") {
-			status = "Running"
-		}
+		status := mapDockerContainerState(dc.State)
 		uptime := strings.TrimSpace(dc.Status)
 		if uptime == "" {
 			uptime = status
@@ -1738,6 +1861,7 @@ func (e *Engine) applyDiscoveredContainersLocked(apiContainers []dockerAPIContai
 			Image:        dc.Image,
 			PreviousTags: []string{},
 			Status:       status,
+			Protected:    IsProtectedSystemContainer(cname),
 			Ports:        ports,
 			Uptime:       uptime,
 			RAMLimitMb:   512,
@@ -1969,6 +2093,16 @@ func (e *Engine) applyDiscoveredImagesLocked(apiImages []dockerAPIImage) {
 		}
 		inUse := di.Containers > 0 || imageUsedByContainers(repoTag, rawID, e.containers)
 
+		historyTags := make([]string, 0, len(di.RepoTags))
+		for _, t := range di.RepoTags {
+			if trimmed := strings.TrimSpace(t); trimmed != "" && trimmed != "<none>:<none>" && !slices.Contains(historyTags, trimmed) {
+				historyTags = append(historyTags, trimmed)
+			}
+		}
+		if len(historyTags) == 0 {
+			historyTags = []string{repoTag}
+		}
+
 		img := DockerImage{
 			ID:       imgID,
 			RepoTag:  repoTag,
@@ -1976,7 +2110,7 @@ func (e *Engine) applyDiscoveredImagesLocked(apiImages []dockerAPIImage) {
 			InUse:    inUse,
 			Dangling: dangling,
 			Created:  formatUnixSeconds(di.Created),
-			History:  []string{repoTag},
+			History:  historyTags,
 		}
 		discoveredImages = append(discoveredImages, img)
 		newDiscoveredImgIDs[img.ID] = true

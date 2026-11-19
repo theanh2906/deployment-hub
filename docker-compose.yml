@@ -21,6 +21,9 @@ services:
       ALLOW_START: 1
       ALLOW_STOP: 1
       ALLOW_RESTARTS: 1
+      ALLOW_PAUSE: 1
+      ALLOW_UNPAUSE: 1
+      SYSTEM: 1
       # Block high-risk Swarm/Node/Secret/Exec APIs
       SWARM: 0
       SECRETS: 0

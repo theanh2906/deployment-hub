@@ -1244,3 +1244,156 @@ func TestFirebaseAuthGateEndToEnd(t *testing.T) {
 		t.Fatalf("expected 401 on replayed cookie after logout, got %d", replayRec.Code)
 	}
 }
+
+func TestDockerDeepEndpointsCheckpoint1(t *testing.T) {
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+			_, _ = w.Write([]byte("OK"))
+		case r.URL.Path == "/version":
+			_ = json.NewEncoder(w).Encode(map[string]string{"Version": "29.1.3"})
+		case r.URL.Path == "/info":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "http-test-node", "NCPU": 4, "MemTotal": int64(8) << 30, "ServerVersion": "29.1.3"})
+		case r.URL.Path == "/containers/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id": "sys9999999999999", "Names": []string{"/deploymenthub-control-plane"},
+					"Image": "hub:latest", "State": "running", "Status": "Up 1h",
+					"Ports": []map[string]any{}, "Labels": map[string]string{},
+				},
+				{
+					"Id": "app8888888888888", "Names": []string{"/dh-sample"},
+					"Image": "sample:v2", "State": "running", "Status": "Up 5m",
+					"Ports": []map[string]any{{"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 4201, "Type": "tcp"}}, "Labels": map[string]string{},
+				},
+			})
+		case r.URL.Path == "/images/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": "sha256:img1", "RepoTags": []string{"sample:v2"}, "Size": 20 << 20, "Containers": 1, "Created": 1700000100},
+				{"Id": "sha256:img2", "RepoTags": []string{"unused:v1"}, "Size": 10 << 20, "Containers": 0, "Created": 1700000000},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/system/df":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"LayersSize": int64(30 << 20),
+				"Images":     []map[string]any{{"Size": int64(30 << 20), "Containers": 1}},
+				"Containers": []map[string]any{},
+				"Volumes":    []map[string]any{},
+				"BuildCache": []map[string]any{{"Size": int64(12 << 20), "InUse": false}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/app8888888888888/json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": "app8888888888888", "Name": "/dh-sample", "Created": "2026-11-19T00:00:00Z",
+				"State": map[string]any{"Status": "running", "Running": true, "Pid": 99},
+				"Config": map[string]any{
+					"Image": "sample:v2", "Tty": true, "Env": []string{"FOO=bar"}, "Cmd": []string{"nginx"},
+					"Labels": map[string]string{}, "ExposedPorts": map[string]any{},
+				},
+				"HostConfig":      map[string]any{"Memory": int64(256 << 20), "NanoCpus": int64(500000000), "RestartPolicy": map[string]any{"Name": "unless-stopped"}},
+				"NetworkSettings": map[string]any{"Ports": map[string]any{}, "Networks": map[string]any{}},
+				"Mounts":          []map[string]any{},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/app8888888888888/stats":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"read":         "2026-11-19T12:00:00Z",
+				"cpu_stats":    map[string]any{"cpu_usage": map[string]any{"total_usage": 2000}, "system_cpu_usage": 10000, "online_cpus": 1},
+				"precpu_stats": map[string]any{"cpu_usage": map[string]any{"total_usage": 1000}, "system_cpu_usage": 9000},
+				"memory_stats": map[string]any{"usage": 64 << 20, "limit": 256 << 20, "stats": map[string]any{}},
+				"networks":     map[string]any{},
+				"pids_stats":   map[string]any{"current": 3},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/app8888888888888/top":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Titles": []string{"PID", "CMD"}, "Processes": [][]string{{"1", "nginx"}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/app8888888888888/update":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Warnings": []string{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/containers/app8888888888888/logs":
+			_, _ = w.Write([]byte("tty boot line 1\ntty ready line 2\n"))
+		case r.Method == http.MethodDelete && r.URL.Path == "/images/img2":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"Deleted": "sha256:img2"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/images/img1/history":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "sha256:aaa", "Created": 1700000000, "CreatedBy": "CMD nginx", "Size": 1024}})
+		case r.Method == http.MethodPost && r.URL.Path == "/build/prune":
+			_ = json.NewEncoder(w).Encode(map[string]any{"CachesDeleted": []string{"b1"}, "SpaceReclaimed": int64(12 << 20)})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dockerSrv.Close()
+
+	v, _ := vault.New("cp1-http-test-master-key")
+	eng := docker.NewEngine(dockerSrv.URL, v)
+	h := New(eng, v, "hook", fstest.MapFS{})
+
+	// 1. Protected system container stop must return 403 Forbidden
+	resProt := doReq(t, h, http.MethodPost, "/api/v1/containers/sys9999999999999/action", map[string]string{"action": "stop"}, nil)
+	if resProt.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on system container stop, got %d %s", resProt.Code, resProt.Body.String())
+	}
+
+	// 2. /docker/df & /containers/stats & inspect & stats & top & update
+	if res := doReq(t, h, http.MethodGet, "/api/v1/docker/df", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"buildCache"`) {
+		t.Fatalf("GET /docker/df failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/containers/stats", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"app8888888888888"`) {
+		t.Fatalf("GET /containers/stats failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/containers/app8888888888888/inspect", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"FOO=bar"`) {
+		t.Fatalf("GET inspect failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/containers/app8888888888888/stats", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"pids":3`) {
+		t.Fatalf("GET stats failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/containers/app8888888888888/top", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"nginx"`) {
+		t.Fatalf("GET top failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/containers/app8888888888888/update", map[string]any{"memoryMb": 512, "cpuCores": 1, "restartPolicy": "always"}, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST update failed: %d %s", res.Code, res.Body.String())
+	}
+
+	// 3. SSE log stream & download .log
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	sseResp, err := http.Get(ts.URL + "/api/v1/containers/app8888888888888/logs/stream?tail=50")
+	if err != nil {
+		t.Fatalf("GET SSE logs failed: %v", err)
+	}
+	defer sseResp.Body.Close()
+	if ct := sseResp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected text/event-stream, got %q", ct)
+	}
+	scanner := bufio.NewScanner(sseResp.Body)
+	var sseLines []string
+	for scanner.Scan() {
+		sseLines = append(sseLines, scanner.Text())
+		if strings.Contains(scanner.Text(), "tty ready line 2") {
+			break
+		}
+	}
+	if !strings.Contains(strings.Join(sseLines, "\n"), "tty boot line 1") {
+		t.Fatalf("expected streamed log line in SSE output: %v", sseLines)
+	}
+
+	resDL := doReq(t, h, http.MethodGet, "/api/v1/containers/app8888888888888/logs/download", nil, nil)
+	if resDL.Code != http.StatusOK || !strings.Contains(resDL.Header().Get("Content-Disposition"), "dh-sample.log") || !strings.Contains(resDL.Body.String(), "tty ready line 2") {
+		t.Fatalf("GET logs/download failed: %d disp=%q body=%q", resDL.Code, resDL.Header().Get("Content-Disposition"), resDL.Body.String())
+	}
+
+	// 4. Image history, delete image, build-cache prune
+	if res := doReq(t, h, http.MethodGet, "/api/v1/images/img1/history", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "CMD nginx") {
+		t.Fatalf("GET image history failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/images/img2", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("DELETE image failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/build-cache/prune", map[string]any{"all": true}, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"cachesDeleted":1`) {
+		t.Fatalf("POST build-cache/prune failed: %d %s", res.Code, res.Body.String())
+	}
+
+	// 5. Enforced auth gate rejects unauthenticated Checkpoint 1 endpoints with 401
+	authMgr := auth.NewManagerWithConfig(v, filepath.Join(t.TempDir(), "auth_cp1.json"), auth.DefaultAdminEmail, true)
+	hAuth := NewWithAuth(eng, v, "hook", fstest.MapFS{}, authMgr)
+	for _, ep := range []string{"/api/v1/docker/df", "/api/v1/containers/stats", "/api/v1/containers/app8888888888888/logs/stream"} {
+		if r401 := doReq(t, hAuth, http.MethodGet, ep, nil, nil); r401.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on %s when auth enforced, got %d", ep, r401.Code)
+		}
+	}
+}
