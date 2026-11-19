@@ -381,7 +381,8 @@ func GenerateDockerfile(req DockerfileRequest) string {
 		b.WriteString("COPY package*.json ./\n")
 		b.WriteString("RUN npm ci\n")
 		b.WriteString("COPY . .\n")
-		fmt.Fprintf(&b, "RUN %s\n\n", buildCmd)
+		fmt.Fprintf(&b, "RUN %s\n", buildCmd)
+		b.WriteString("RUN mkdir -p /app/public\n\n")
 
 		b.WriteString("FROM node:20-alpine AS runner\n")
 		b.WriteString("WORKDIR /app\n")
@@ -393,6 +394,7 @@ func GenerateDockerfile(req DockerfileRequest) string {
 		} else {
 			b.WriteString("ENV NODE_ENV=\"production\"\n")
 		}
+		b.WriteString("COPY --from=builder /app/public ./public\n")
 		b.WriteString("COPY --from=builder /app/.next/standalone ./\n")
 		b.WriteString("COPY --from=builder /app/.next/static ./.next/static\n")
 		fmt.Fprintf(&b, "EXPOSE %s\n", portNum)

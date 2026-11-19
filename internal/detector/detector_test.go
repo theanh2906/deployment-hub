@@ -126,7 +126,7 @@ func TestGenerateDockerfileAllStacks(t *testing.T) {
 		preset   string
 		contains []string
 	}{
-		{"nextjs", []string{"FROM node:20-alpine AS builder", ".next/standalone", "HEALTHCHECK", "vips-dev"}},
+		{"nextjs", []string{"FROM node:20-alpine AS builder", ".next/standalone", ".next/static", "./public", "HEALTHCHECK", "vips-dev"}},
 		{"spa", []string{"FROM nginx:1.27-alpine", "/usr/share/nginx/html", "HEALTHCHECK"}},
 		{"go", []string{"CGO_ENABLED=0", "gcr.io/distroless/static-debian12", "HEALTHCHECK"}},
 		{"rust", []string{"FROM rust:1.80-alpine AS builder", "FROM alpine:3.20", "pkg-config", "musl-dev", "HEALTHCHECK"}},

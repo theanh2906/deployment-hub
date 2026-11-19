@@ -159,10 +159,19 @@ func (e *Engine) runRealDockerDeployment(dep *deploymentState, req DeployRequest
 		containerPort = "80"
 	}
 
-	runtimeDockerfile, buildSummary := buildResilientRuntimeDockerfile(workDir, req, localDet, containerPort)
-	if err := os.WriteFile(filepath.Join(workDir, "Dockerfile"), []byte(runtimeDockerfile), 0o644); err != nil {
-		e.emitDeployEvent(dep, 2, "failed", fmt.Sprintf("[2/5] ✗ Failed writing Dockerfile: %v", err), true, secrets)
-		return
+	var runtimeDockerfile, buildSummary string
+	if existingDF, exposedPort, hasRepoDF := readExistingRepoDockerfile(workDir); hasRepoDF {
+		if exposedPort != "" && (strings.TrimSpace(req.PortMapping) == "" || req.PresetKey == "spa") {
+			containerPort = exposedPort
+		}
+		runtimeDockerfile = existingDF
+		buildSummary = fmt.Sprintf("Using repository Dockerfile (port: %s)", containerPort)
+	} else {
+		runtimeDockerfile, buildSummary = buildResilientRuntimeDockerfile(workDir, req, localDet, containerPort)
+		if err := os.WriteFile(filepath.Join(workDir, "Dockerfile"), []byte(runtimeDockerfile), 0o644); err != nil {
+			e.emitDeployEvent(dep, 2, "failed", fmt.Sprintf("[2/5] ✗ Failed writing Dockerfile: %v", err), true, secrets)
+			return
+		}
 	}
 	// Remove .dockerignore if it excludes Dockerfile or critical build files
 	_ = os.Remove(filepath.Join(workDir, ".dockerignore"))
@@ -544,6 +553,10 @@ func buildResilientRuntimeDockerfile(workDir string, req DeployRequest, det dete
 			b.WriteString("RUN npm ci --legacy-peer-deps || npm install --legacy-peer-deps\n")
 			b.WriteString("RUN if [ -f prisma/schema.prisma ]; then npx prisma generate || true; fi\n")
 			b.WriteString("RUN npm run build || true\n")
+			b.WriteString("RUN if [ -d .next/standalone ]; then \\\n")
+			b.WriteString("      if [ -d .next/static ]; then mkdir -p .next/standalone/.next && cp -r .next/static .next/standalone/.next/static; fi; \\\n")
+			b.WriteString("      if [ -d public ]; then cp -r public .next/standalone/public; fi; \\\n")
+			b.WriteString("    fi\n")
 			fmt.Fprintf(&b, "ENV NODE_ENV=production PORT=%s HOSTNAME=0.0.0.0\n", containerPort)
 			fmt.Fprintf(&b, "EXPOSE %s\n", containerPort)
 			fmt.Fprintf(&b, "CMD [\"sh\", \"-c\", \"if [ -f .next/standalone/server.js ]; then node .next/standalone/server.js; elif [ -d .next ]; then npx next start -H 0.0.0.0 -p %s; elif [ -f dist/main.js ]; then node dist/main.js; else npm start; fi\"]\n", containerPort)
@@ -603,6 +616,43 @@ func findGoMainInDir(workDir string) string {
 		return "."
 	}
 	return ""
+}
+
+// readExistingRepoDockerfile inspects an existing repository Dockerfile and extracts its last numeric EXPOSE port.
+func readExistingRepoDockerfile(workDir string) (content string, exposedPort string, ok bool) {
+	raw, err := os.ReadFile(filepath.Join(workDir, "Dockerfile"))
+	if err != nil || strings.TrimSpace(string(raw)) == "" {
+		return "", "", false
+	}
+
+	hasFrom := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		tr := strings.TrimSpace(line)
+		if tr == "" || strings.HasPrefix(tr, "#") {
+			continue
+		}
+		upper := strings.ToUpper(tr)
+		if strings.HasPrefix(upper, "FROM ") {
+			hasFrom = true
+			continue
+		}
+		if strings.HasPrefix(upper, "EXPOSE ") {
+			fields := strings.Fields(tr[len("EXPOSE "):])
+			if len(fields) > 0 {
+				tok := strings.TrimSpace(fields[0])
+				if slash := strings.IndexByte(tok, '/'); slash > 0 {
+					tok = tok[:slash]
+				}
+				if p, err := strconv.Atoi(tok); err == nil && p >= 1 && p <= 65535 {
+					exposedPort = strconv.Itoa(p)
+				}
+			}
+		}
+	}
+	if !hasFrom {
+		return "", "", false
+	}
+	return string(raw), exposedPort, true
 }
 
 func fileExists(p string) bool {
