@@ -3,10 +3,18 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"crypto"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1111,5 +1119,128 @@ func TestGoogleAuthGateEndToEnd(t *testing.T) {
 	h.ServeHTTP(replayRec, ovReq)
 	if replayRec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected replayed session cookie after logout to fail 401, got %d", replayRec.Code)
+	}
+}
+
+func TestFirebaseAuthGateEndToEnd(t *testing.T) {
+	const (
+		fbProjectID = "useful-tool"
+		fbAPIKey    = "AIzaSyUsefulToolPublicKey12345"
+		fbKid       = "fb-kid-1"
+	)
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "securetoken@system.gserviceaccount.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate: %v", err)
+	}
+	pemCert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+
+	certsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_ = json.NewEncoder(w).Encode(map[string]string{fbKid: pemCert})
+	}))
+	defer certsSrv.Close()
+
+	signJWT := func(email, provider string) string {
+		now := time.Now().Unix()
+		hB, _ := json.Marshal(map[string]any{"alg": "RS256", "kid": fbKid})
+		cB, _ := json.Marshal(map[string]any{
+			"aud":            fbProjectID,
+			"iss":            "https://securetoken.google.com/" + fbProjectID,
+			"sub":            "uid-1",
+			"iat":            now - 5,
+			"auth_time":      now - 5,
+			"exp":            now + 3600,
+			"email":          email,
+			"email_verified": true,
+			"name":           "The Anh",
+			"firebase":       map[string]any{"sign_in_provider": provider},
+		})
+		inp := base64.RawURLEncoding.EncodeToString(hB) + "." + base64.RawURLEncoding.EncodeToString(cB)
+		sum := sha256.Sum256([]byte(inp))
+		sig, _ := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, sum[:])
+		return inp + "." + base64.RawURLEncoding.EncodeToString(sig)
+	}
+
+	v, err := vault.New("server-firebase-auth-test-key")
+	if err != nil {
+		t.Fatalf("vault.New: %v", err)
+	}
+	eng := docker.NewEngine("", v)
+	authMgr := auth.NewManagerWithConfig(v, filepath.Join(t.TempDir(), "auth.json"), auth.DefaultAdminEmail, true)
+	authMgr.SetFirebaseCertsURLForTest(certsSrv.URL)
+
+	h := NewWithAuth(eng, v, "hook-secret", fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><html><body>UI</body></html>")},
+	}, authMgr)
+
+	// 1. One-time Firebase config save succeeds
+	cfgRes := doReq(t, h, http.MethodPost, "/api/v1/auth/firebase/config", map[string]any{
+		"apiKey":    fbAPIKey,
+		"projectId": fbProjectID,
+	}, nil)
+	if cfgRes.Code != http.StatusOK || !strings.Contains(cfgRes.Body.String(), `"firebaseConfigured":true`) {
+		t.Fatalf("expected firebase bootstrap config 200, got %d %s", cfgRes.Code, cfgRes.Body.String())
+	}
+
+	// 2. Unauthenticated overwrite blocked with 401
+	if res := doReq(t, h, http.MethodPost, "/api/v1/auth/firebase/config", map[string]any{"apiKey": "evil", "projectId": "evil"}, nil); res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated firebase overwrite 401, got %d", res.Code)
+	}
+
+	// 3. Reject wrong email (403) and non-Google provider (403)
+	if res := doReq(t, h, http.MethodPost, "/api/v1/auth/firebase/login", map[string]any{"idToken": signJWT("other@gmail.com", "google.com")}, nil); res.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for wrong email, got %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/auth/firebase/login", map[string]any{"idToken": signJWT(auth.DefaultAdminEmail, "password")}, nil); res.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for password provider, got %d %s", res.Code, res.Body.String())
+	}
+
+	// 4. Valid Google Firebase login for admin issues dh_session cookie unlocking /api/v1/overview
+	loginRes := doReq(t, h, http.MethodPost, "/api/v1/auth/firebase/login", map[string]any{"idToken": signJWT(auth.DefaultAdminEmail, "google.com")}, nil)
+	if loginRes.Code != http.StatusOK || !strings.Contains(loginRes.Body.String(), `"authenticated":true`) {
+		t.Fatalf("expected valid Firebase admin login 200, got %d %s", loginRes.Code, loginRes.Body.String())
+	}
+	var sessCookie *http.Cookie
+	for _, c := range loginRes.Result().Cookies() {
+		if c.Name == auth.SessionCookieName && c.Value != "" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("missing dh_session cookie on Firebase login")
+	}
+
+	ovReq := httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil)
+	ovReq.AddCookie(sessCookie)
+	ovRec := httptest.NewRecorder()
+	h.ServeHTTP(ovRec, ovReq)
+	if ovRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /api/v1/overview with Firebase session, got %d", ovRec.Code)
+	}
+
+	// 5. Logout revokes session so replaying cookie returns 401
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutReq.AddCookie(sessCookie)
+	logoutRec := httptest.NewRecorder()
+	h.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 logout, got %d", logoutRec.Code)
+	}
+	replayRec := httptest.NewRecorder()
+	h.ServeHTTP(replayRec, ovReq)
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on replayed cookie after logout, got %d", replayRec.Code)
 	}
 }

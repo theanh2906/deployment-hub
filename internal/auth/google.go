@@ -4,6 +4,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -51,27 +52,41 @@ type Session struct {
 	ExpiresAt int64  `json:"expiresAt"`
 }
 
-// PersistedConfig stores UI-configured Google OAuth client settings on disk
-// with the client secret sealed via the DeploymentHub AES-256-GCM vault.
+// PersistedConfig stores UI-configured Google OAuth / Firebase Auth settings on disk
+// with any Google client secret sealed via the DeploymentHub AES-256-GCM vault.
 type PersistedConfig struct {
-	ClientID              string `json:"clientId"`
-	EncryptedClientSecret string `json:"encryptedClientSecret"`
+	ClientID              string `json:"clientId,omitempty"`
+	EncryptedClientSecret string `json:"encryptedClientSecret,omitempty"`
 	RedirectURL           string `json:"redirectUrl,omitempty"`
+	FirebaseAPIKey        string `json:"firebaseApiKey,omitempty"`
+	FirebaseAuthDomain    string `json:"firebaseAuthDomain,omitempty"`
+	FirebaseProjectID     string `json:"firebaseProjectId,omitempty"`
 	UpdatedAt             string `json:"updatedAt,omitempty"`
 }
 
-// Status reports the authentication gate and Google OAuth configuration state.
+// FirebasePublicConfig carries the non-secret Web SDK config needed by the browser login screen.
+type FirebasePublicConfig struct {
+	APIKey     string `json:"apiKey"`
+	AuthDomain string `json:"authDomain"`
+	ProjectID  string `json:"projectId"`
+}
+
+// Status reports the authentication gate and Google OAuth / Firebase Auth configuration state.
 type Status struct {
-	Enforced          bool     `json:"enforced"`
-	Configured        bool     `json:"configured"`
-	Authenticated     bool     `json:"authenticated"`
-	AdminEmail        string   `json:"adminEmail"`
-	ClientIDPreview   string   `json:"clientIdPreview"`
-	SecretPreview     string   `json:"secretPreview"`
-	CallbackURL       string   `json:"callbackUrl"`
-	RecommendedOrigin string   `json:"recommendedOrigin,omitempty"`
-	Source            string   `json:"source"`
-	User              *Session `json:"user,omitempty"`
+	Enforced              bool                  `json:"enforced"`
+	Configured            bool                  `json:"configured"`
+	FirebaseConfigured    bool                  `json:"firebaseConfigured"`
+	GoogleOAuthConfigured bool                  `json:"googleOAuthConfigured"`
+	Authenticated         bool                  `json:"authenticated"`
+	AdminEmail            string                `json:"adminEmail"`
+	ClientIDPreview       string                `json:"clientIdPreview"`
+	SecretPreview         string                `json:"secretPreview"`
+	CallbackURL           string                `json:"callbackUrl"`
+	AuthorizedDomain      string                `json:"authorizedDomain,omitempty"`
+	RecommendedOrigin     string                `json:"recommendedOrigin,omitempty"`
+	Source                string                `json:"source"`
+	Firebase              *FirebasePublicConfig `json:"firebase,omitempty"`
+	User                  *Session              `json:"user,omitempty"`
 }
 
 type pendingOAuthState struct {
@@ -80,25 +95,32 @@ type pendingOAuthState struct {
 	expiresAt    int64
 }
 
-// Manager implements Google OAuth 2.0 + PKCE login restricted to a single admin email.
+// Manager implements Google / Firebase Google-only login restricted to a single admin email.
 type Manager struct {
-	mu              sync.RWMutex
-	vault           *vault.Vault
-	dataFilePath    string
-	adminEmail      string
-	enforceSetup    bool
-	envClientID     string
-	envClientSecret string
-	envRedirectURL  string
-	fileCfg         PersistedConfig
+	mu                   sync.RWMutex
+	vault                *vault.Vault
+	dataFilePath         string
+	adminEmail           string
+	enforceSetup         bool
+	envClientID          string
+	envClientSecret      string
+	envRedirectURL       string
+	envFirebaseAPIKey    string
+	envFirebaseAuthDomain string
+	envFirebaseProjectID string
+	fileCfg              PersistedConfig
 
-	authURL     string
-	tokenURL    string
-	userInfoURL string
-	httpClient  *http.Client
+	authURL          string
+	tokenURL         string
+	userInfoURL      string
+	firebaseCertsURL string
+	httpClient       *http.Client
 
-	pending map[string]pendingOAuthState
-	revoked map[string]int64
+	pending            map[string]pendingOAuthState
+	revoked            map[string]int64
+	certCache          map[string]*rsa.PublicKey
+	certCacheExpires   time.Time
+	certCacheFetchedAt time.Time
 }
 
 // NewManager initializes an auth.Manager from environment variables and AUTH_DATA_FILE.
@@ -116,6 +138,9 @@ func NewManager(v *vault.Vault) *Manager {
 	m.envClientID = strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
 	m.envClientSecret = strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET"))
 	m.envRedirectURL = strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL"))
+	m.envFirebaseAPIKey = strings.TrimSpace(os.Getenv("FIREBASE_API_KEY"))
+	m.envFirebaseAuthDomain = strings.TrimSpace(os.Getenv("FIREBASE_AUTH_DOMAIN"))
+	m.envFirebaseProjectID = strings.TrimSpace(os.Getenv("FIREBASE_PROJECT_ID"))
 	m.mu.Unlock()
 	return m
 }
@@ -127,16 +152,18 @@ func NewManagerWithConfig(v *vault.Vault, dataFile, adminEmail string, enforceSe
 		cleanAdmin = DefaultAdminEmail
 	}
 	m := &Manager{
-		vault:        v,
-		dataFilePath: strings.TrimSpace(dataFile),
-		adminEmail:   cleanAdmin,
-		enforceSetup: enforceSetup,
-		authURL:      defaultGoogleAuthURL,
-		tokenURL:     defaultGoogleTokenURL,
-		userInfoURL:  defaultGoogleUserInfoURL,
-		httpClient:   &http.Client{Timeout: 12 * time.Second},
-		pending:      make(map[string]pendingOAuthState),
-		revoked:      make(map[string]int64),
+		vault:            v,
+		dataFilePath:     strings.TrimSpace(dataFile),
+		adminEmail:       cleanAdmin,
+		enforceSetup:     enforceSetup,
+		authURL:          defaultGoogleAuthURL,
+		tokenURL:         defaultGoogleTokenURL,
+		userInfoURL:      defaultGoogleUserInfoURL,
+		firebaseCertsURL: defaultFirebaseCertsURL,
+		httpClient:       &http.Client{Timeout: 12 * time.Second},
+		pending:          make(map[string]pendingOAuthState),
+		revoked:          make(map[string]int64),
+		certCache:        make(map[string]*rsa.PublicKey),
 	}
 	m.loadFromDisk()
 	return m
@@ -215,10 +242,14 @@ func (m *Manager) activeCredentials() (clientID, clientSecret, redirectURL, sour
 	return "", "", envRedir, "none", "", false
 }
 
-// IsConfigured reports whether active Google OAuth client credentials are available.
-func (m *Manager) IsConfigured() bool {
+func (m *Manager) isGoogleOAuthConfigured() bool {
 	_, _, _, _, _, ok := m.activeCredentials()
 	return ok
+}
+
+// IsConfigured reports whether Firebase Auth or Google OAuth client credentials are available.
+func (m *Manager) IsConfigured() bool {
+	return m.IsFirebaseConfigured() || m.isGoogleOAuthConfigured()
 }
 
 // IsEnforced reports whether requests to protected endpoints must carry a valid admin session.
@@ -264,27 +295,33 @@ func (m *Manager) SaveConfig(clientID, clientSecret, redirectURL string) error {
 		return errors.New("google clientSecret is required")
 	}
 
-	nextCfg := PersistedConfig{
-		ClientID:              cleanID,
-		EncryptedClientSecret: encSecret,
-		RedirectURL:           cleanRedirect,
-		UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
-	}
+	nextCfg := m.fileCfg
+	nextCfg.ClientID = cleanID
+	nextCfg.EncryptedClientSecret = encSecret
+	nextCfg.RedirectURL = cleanRedirect
+	nextCfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	if m.dataFilePath != "" {
-		encoded, err := json.MarshalIndent(nextCfg, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(m.dataFilePath), 0o755); err != nil {
-			return fmt.Errorf("create auth config dir: %w", err)
-		}
-		if err := writeFileAtomic(m.dataFilePath, encoded, 0o600); err != nil {
-			return fmt.Errorf("persist auth config: %w", err)
-		}
+	if err := m.persistConfigLocked(nextCfg); err != nil {
+		return err
 	}
-
 	m.fileCfg = nextCfg
+	return nil
+}
+
+func (m *Manager) persistConfigLocked(nextCfg PersistedConfig) error {
+	if m.dataFilePath == "" {
+		return nil
+	}
+	encoded, err := json.MarshalIndent(nextCfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.dataFilePath), 0o755); err != nil {
+		return fmt.Errorf("create auth config dir: %w", err)
+	}
+	if err := writeFileAtomic(m.dataFilePath, encoded, 0o600); err != nil {
+		return fmt.Errorf("persist auth config: %w", err)
+	}
 	return nil
 }
 
@@ -315,23 +352,59 @@ func (m *Manager) ResolveCallbackURL(r *http.Request, recommendedOrigin string) 
 // StatusForRequest returns public/admin auth status suitable for /api/v1/auth/status.
 func (m *Manager) StatusForRequest(r *http.Request, recommendedOrigin string) Status {
 	sess, authed := m.AuthenticateRequest(r)
-	clientID, _, _, source, secretPreview, configured := m.activeCredentials()
+	clientID, _, _, googleSource, secretPreview, googleOK := m.activeCredentials()
+	fbCfg, fbSource, fbOK := m.activeFirebaseConfig()
+
+	recOrigin := strings.TrimRight(strings.TrimSpace(recommendedOrigin), "/")
+	authDomain := extractDomainOnly(recOrigin)
+	if authDomain == "" {
+		authDomain = extractDomainOnly(requestHost(r))
+	}
+
+	source := googleSource
+	if fbOK {
+		source = fbSource
+	}
+
 	st := Status{
-		Enforced:          m.IsEnforced(),
-		Configured:        configured,
-		Authenticated:     authed,
-		AdminEmail:        m.AdminEmail(),
-		ClientIDPreview:   maskClientID(clientID, authed),
-		SecretPreview:     secretPreview,
-		CallbackURL:       m.ResolveCallbackURL(r, recommendedOrigin),
-		RecommendedOrigin: strings.TrimRight(strings.TrimSpace(recommendedOrigin), "/"),
-		Source:            source,
+		Enforced:              m.IsEnforced(),
+		Configured:            fbOK || googleOK,
+		FirebaseConfigured:    fbOK,
+		GoogleOAuthConfigured: googleOK,
+		Authenticated:         authed,
+		AdminEmail:            m.AdminEmail(),
+		ClientIDPreview:       maskClientID(clientID, authed),
+		SecretPreview:         secretPreview,
+		CallbackURL:           m.ResolveCallbackURL(r, recommendedOrigin),
+		AuthorizedDomain:      authDomain,
+		RecommendedOrigin:     recOrigin,
+		Source:                source,
+	}
+	if fbOK {
+		copiedFB := fbCfg
+		st.Firebase = &copiedFB
 	}
 	if authed && sess != nil {
 		copied := *sess
 		st.User = &copied
 	}
 	return st
+}
+
+func extractDomainOnly(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		if parsed, err := url.Parse(s); err == nil {
+			s = parsed.Host
+		}
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		s = host
+	}
+	return strings.Trim(s, "[]")
 }
 
 // StartGoogleLogin initiates Google OAuth 2.0 Authorization Code + PKCE flow,
@@ -452,7 +525,6 @@ func (m *Manager) HandleGoogleCallback(w http.ResponseWriter, r *http.Request) (
 	tokenEndpoint := m.tokenURL
 	userInfoEndpoint := m.userInfoURL
 	client := m.httpClient
-	v := m.vault
 	allowedEmail := m.adminEmail
 	m.mu.Unlock()
 
@@ -531,6 +603,10 @@ func (m *Manager) HandleGoogleCallback(w http.ResponseWriter, r *http.Request) (
 		return nil, "unauthorized_email", fmt.Errorf("google account %q is not authorized (allowed=%s verified=%v)", cleanEmail, allowedEmail, userInfo.EmailVerified)
 	}
 
+	return m.issueSessionCookie(w, r, cleanEmail, userInfo.Name, userInfo.Picture)
+}
+
+func (m *Manager) issueSessionCookie(w http.ResponseWriter, r *http.Request, cleanEmail, name, picture string) (*Session, string, error) {
 	jti, err := randomHex(16)
 	if err != nil {
 		return nil, "session_error", err
@@ -539,12 +615,15 @@ func (m *Manager) HandleGoogleCallback(w http.ResponseWriter, r *http.Request) (
 	sess := &Session{
 		JTI:       jti,
 		Email:     cleanEmail,
-		Name:      strings.TrimSpace(userInfo.Name),
-		Picture:   strings.TrimSpace(userInfo.Picture),
+		Name:      strings.TrimSpace(name),
+		Picture:   strings.TrimSpace(picture),
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(sessionTTL).Unix(),
 	}
 
+	m.mu.RLock()
+	v := m.vault
+	m.mu.RUnlock()
 	if v == nil {
 		return nil, "session_error", errors.New("crypto vault unavailable")
 	}

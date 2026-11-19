@@ -66,6 +66,8 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	mux.HandleFunc("POST /api/v1/auth/google/config", s.handleAuthGoogleConfig)
 	mux.HandleFunc("GET /api/v1/auth/google/login", s.handleAuthGoogleLogin)
 	mux.HandleFunc("GET /api/v1/auth/google/callback", s.handleAuthGoogleCallback)
+	mux.HandleFunc("POST /api/v1/auth/firebase/config", s.handleAuthFirebaseConfig)
+	mux.HandleFunc("POST /api/v1/auth/firebase/login", s.handleAuthFirebaseLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/v1/projects", s.handleListProjects)
@@ -286,6 +288,80 @@ func (s *apiServer) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "logged_out",
 		"auth":   s.auth.StatusForRequest(r, s.recommendedHubOrigin()),
+	})
+}
+
+func (s *apiServer) handleAuthFirebaseConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.authConfigBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang lưu cấu hình Firebase Auth, vui lòng đợi...")
+		return
+	}
+	defer s.authConfigBusy.Store(false)
+
+	if s.auth.IsConfigured() {
+		if _, ok := s.auth.AuthenticateRequest(r); !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":        "authentication required to update Firebase Auth settings",
+				"authRequired": true,
+				"adminEmail":   s.auth.AdminEmail(),
+			})
+			return
+		}
+	}
+
+	var req struct {
+		APIKey     string `json:"apiKey"`
+		AuthDomain string `json:"authDomain"`
+		ProjectID  string `json:"projectId"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.auth.SaveFirebaseConfig(req.APIKey, req.AuthDomain, req.ProjectID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.auth.StatusForRequest(r, s.recommendedHubOrigin()))
+}
+
+func (s *apiServer) handleAuthFirebaseLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	var req struct {
+		IDToken string `json:"idToken"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	sess, errCode, err := s.auth.VerifyFirebaseIDTokenAndLogin(w, r, req.IDToken)
+	if err != nil {
+		log.Printf("[auth] firebase login rejected (code=%s): %v", errCode, err)
+		status := http.StatusUnauthorized
+		msg := err.Error()
+		switch errCode {
+		case "unauthorized_email":
+			status = http.StatusForbidden
+			msg = fmt.Sprintf("Tài khoản Google không thuộc quyền Admin (%s).", s.auth.AdminEmail())
+		case "google_only_required":
+			status = http.StatusForbidden
+			msg = "Chỉ cho phép đăng nhập bằng Google (Google Sign-In)."
+		case "not_configured":
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]any{
+			"error":      msg,
+			"code":       errCode,
+			"adminEmail": s.auth.AdminEmail(),
+		})
+		return
+	}
+	log.Printf("[auth] admin signed in via Firebase Google: %s", sess.Email)
+	st := s.auth.StatusForRequest(r, s.recommendedHubOrigin())
+	st.Authenticated = true
+	st.User = sess
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "authenticated",
+		"auth":   st,
 	})
 }
 
