@@ -658,7 +658,20 @@
           timestamps: true,
           autoScroll: true,
           connected: false
-        }
+        },
+        volumes: [],
+        loadingVolumes: false,
+        newVol: { name: '', driver: 'local' },
+        networks: [],
+        loadingNetworks: false,
+        newNet: { name: '', driver: 'bridge', subnet: '', gateway: '', internal: false },
+        connectNet: {},
+        events: [],
+        loadingEvents: false,
+        eventFilter: 'all',
+        eventsEs: null,
+        eventsConnected: false,
+        eventsSyncTimer: null
       },
       mah: {
         subTab: 'overview',
@@ -1204,6 +1217,8 @@
       a.loggingOut = true;
       renderHeader();
       try {
+        if (typeof stopModalLogStream === 'function') stopModalLogStream();
+        if (typeof stopDockerEventsStream === 'function') stopDockerEventsStream();
         await apiFetch('/auth/logout', { method: 'POST' });
         a.authenticated = false;
         a.user = null;
@@ -1638,10 +1653,14 @@ volumes:
 
     function setTab(tab) {
       state.activeTab = tab;
+      if (tab !== 'docker' && typeof stopDockerEventsStream === 'function') {
+        stopDockerEventsStream();
+      }
       renderWorkspace();
       renderHeader();
       if (tab === 'docker' && typeof refreshDockerTabData === 'function') {
         refreshDockerTabData({ silent: true });
+        if (typeof connectDockerEventsStream === 'function') connectDockerEventsStream();
       }
     }
 
@@ -4168,12 +4187,293 @@ volumes:
       }
     }
 
+    async function refreshVolumes(opts = {}) {
+      if (!canUseBackend()) return [];
+      state.docker.loadingVolumes = true;
+      if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'volumes') renderMainView();
+      try {
+        const res = await apiFetch('/volumes');
+        state.docker.volumes = Array.isArray(res.volumes) ? res.volumes : [];
+        state.docker.loadingVolumes = false;
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'volumes') renderMainView();
+        return state.docker.volumes;
+      } catch (err) {
+        state.docker.loadingVolumes = false;
+        if (!opts.silent) showToast(err.message || 'Không thể tải Volumes', 'error');
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'volumes') renderMainView();
+        return [];
+      }
+    }
+
+    async function createDockerVolume(e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (!canUseBackend() || state.docker.busyKey) return;
+      const nv = state.docker.newVol || {};
+      const name = String(nv.name || '').trim();
+      if (!name) return;
+      state.docker.busyKey = 'vol:create';
+      renderMainView();
+      try {
+        await apiFetch('/volumes', {
+          method: 'POST',
+          body: JSON.stringify({ name, driver: String(nv.driver || 'local').trim() || 'local' })
+        });
+        state.docker.newVol = { name: '', driver: 'local' };
+        await refreshVolumes({ silent: true, skipRender: true });
+        await refreshDockerDiskUsage({ silent: true, skipRender: true });
+        showToast(`Đã tạo Docker Volume "${name}"!`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Tạo Volume thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function removeDockerVolume(name) {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      if (typeof confirm === 'function' && !confirm(`Xác nhận xóa vĩnh viễn Volume "${name}"? Toàn bộ dữ liệu trong volume sẽ mất!`)) return;
+      state.docker.busyKey = `vol:del:${name}`;
+      renderMainView();
+      try {
+        await apiFetch(`/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        await refreshVolumes({ silent: true, skipRender: true });
+        await refreshDockerDiskUsage({ silent: true, skipRender: true });
+        showToast(`Đã xóa Volume ${name}`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : `Không thể xóa Volume ${name}`, 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function pruneDockerVolumes() {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      if (typeof confirm === 'function' && !confirm('Dọn tất cả Anonymous / Unused Volumes không gắn container?')) return;
+      state.docker.busyKey = 'vol:prune';
+      renderMainView();
+      try {
+        const res = await apiFetch('/volumes/prune', { method: 'POST' });
+        await refreshVolumes({ silent: true, skipRender: true });
+        await refreshDockerDiskUsage({ silent: true, skipRender: true });
+        showToast(`Đã dọn ${res.removedCount || 0} Unused Volumes (${fmtBytes(res.reclaimedBytes || 0)})!`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Prune Volumes thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function refreshNetworks(opts = {}) {
+      if (!canUseBackend()) return [];
+      state.docker.loadingNetworks = true;
+      if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'networks') renderMainView();
+      try {
+        const res = await apiFetch('/networks');
+        state.docker.networks = Array.isArray(res.networks) ? res.networks : [];
+        state.docker.loadingNetworks = false;
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'networks') renderMainView();
+        return state.docker.networks;
+      } catch (err) {
+        state.docker.loadingNetworks = false;
+        if (!opts.silent) showToast(err.message || 'Không thể tải Networks', 'error');
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'networks') renderMainView();
+        return [];
+      }
+    }
+
+    async function createDockerNetwork(e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (!canUseBackend() || state.docker.busyKey) return;
+      const nn = state.docker.newNet || {};
+      const name = String(nn.name || '').trim();
+      if (!name) return;
+      state.docker.busyKey = 'net:create';
+      renderMainView();
+      try {
+        await apiFetch('/networks', {
+          method: 'POST',
+          body: JSON.stringify({
+            name,
+            driver: String(nn.driver || 'bridge').trim() || 'bridge',
+            subnet: String(nn.subnet || '').trim(),
+            gateway: String(nn.gateway || '').trim(),
+            internal: Boolean(nn.internal)
+          })
+        });
+        state.docker.newNet = { name: '', driver: 'bridge', subnet: '', gateway: '', internal: false };
+        await refreshNetworks({ silent: true, skipRender: true });
+        showToast(`Đã tạo Docker Network "${name}"!`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Tạo Network thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function removeDockerNetwork(id, name) {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      if (typeof confirm === 'function' && !confirm(`Xóa Docker Network "${name}"?`)) return;
+      state.docker.busyKey = `net:del:${id}`;
+      renderMainView();
+      try {
+        await apiFetch(`/networks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        await refreshNetworks({ silent: true, skipRender: true });
+        showToast(`Đã xóa Network ${name}`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : `Không thể xóa Network ${name}`, 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function connectContainerNetwork(netId) {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      const cid = String((state.docker.connectNet && state.docker.connectNet[netId]) || '').trim();
+      if (!cid) {
+        showToast('Chọn container để attach vào network', 'warn');
+        return;
+      }
+      state.docker.busyKey = `net:conn:${netId}`;
+      renderMainView();
+      try {
+        await apiFetch(`/networks/${encodeURIComponent(netId)}/connect`, {
+          method: 'POST',
+          body: JSON.stringify({ containerId: cid })
+        });
+        await refreshNetworks({ silent: true, skipRender: true });
+        showToast('Đã attach container vào network!', 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Attach thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function disconnectContainerNetwork(netId, containerId, containerName) {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      if (typeof confirm === 'function' && !confirm(`Ngắt kết nối container "${containerName}" khỏi network này?`)) return;
+      state.docker.busyKey = `net:disc:${netId}:${containerId}`;
+      renderMainView();
+      try {
+        await apiFetch(`/networks/${encodeURIComponent(netId)}/disconnect`, {
+          method: 'POST',
+          body: JSON.stringify({ containerId })
+        });
+        await refreshNetworks({ silent: true, skipRender: true });
+        showToast(`Đã detach ${containerName}`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Detach thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function pruneDockerNetworks() {
+      if (!canUseBackend() || state.docker.busyKey) return;
+      if (typeof confirm === 'function' && !confirm('Dọn tất cả Unused Networks không có container?')) return;
+      state.docker.busyKey = 'net:prune';
+      renderMainView();
+      try {
+        const res = await apiFetch('/networks/prune', { method: 'POST' });
+        await refreshNetworks({ silent: true, skipRender: true });
+        showToast(`Đã dọn ${res.removedCount || 0} Unused Networks!`, 'success');
+      } catch (err) {
+        showToast(err && err.message ? err.message : 'Prune Networks thất bại', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        if (state.activeTab === 'docker') renderMainView();
+      }
+    }
+
+    async function refreshDockerEvents(opts = {}) {
+      if (!canUseBackend()) return [];
+      state.docker.loadingEvents = true;
+      try {
+        const res = await apiFetch('/docker/events');
+        state.docker.events = Array.isArray(res.events) ? res.events : [];
+        state.docker.loadingEvents = false;
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'events') renderMainView();
+        return state.docker.events;
+      } catch {
+        state.docker.loadingEvents = false;
+        return state.docker.events || [];
+      }
+    }
+
+    function stopDockerEventsStream() {
+      const d = state.docker;
+      if (!d) return;
+      if (d.eventsSyncTimer) {
+        clearTimeout(d.eventsSyncTimer);
+        d.eventsSyncTimer = null;
+      }
+      if (d.eventsEs) {
+        try { d.eventsEs.close(); } catch {}
+        d.eventsEs = null;
+      }
+      d.eventsConnected = false;
+    }
+
+    function connectDockerEventsStream() {
+      if (!canUseBackend() || typeof EventSource === 'undefined') return;
+      const d = state.docker;
+      if (d.eventsEs) return;
+      const es = new EventSource('/api/v1/docker/events/stream');
+      d.eventsEs = es;
+      es.onopen = () => {
+        d.eventsConnected = true;
+        const el = document.getElementById('dockerEventsLiveStatus');
+        if (el) el.textContent = '● Live Events SSE';
+      };
+      es.addEventListener('docker_event', (ev) => {
+        try {
+          const item = JSON.parse(ev.data || '{}');
+          if (!item || !item.action) return;
+          if (!Array.isArray(d.events)) d.events = [];
+          const dup = d.events.some(x => x.timeUnix === item.timeUnix && x.actorId === item.actorId && x.action === item.action && x.type === item.type);
+          if (!dup) {
+            d.events.push(item);
+            if (d.events.length > 150) d.events = d.events.slice(-150);
+          }
+          const feed = document.getElementById('dockerEventsFeedHost');
+          if (feed) {
+            feed.innerHTML = renderDockerEventRowsHtml();
+          }
+          if ((item.type === 'container' || item.type === 'image') && !d.eventsSyncTimer) {
+            d.eventsSyncTimer = setTimeout(async () => {
+              d.eventsSyncTimer = null;
+              if (state.activeTab !== 'docker') return;
+              await refreshOverview();
+              renderHeader();
+              const active = typeof document !== 'undefined' ? document.activeElement : null;
+              const editingInput = active && active.tagName && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') && document.getElementById('mainViewContainer')?.contains(active);
+              if (!editingInput) renderMainView();
+            }, 1200);
+          }
+        } catch {}
+      });
+      es.onerror = () => {
+        d.eventsConnected = false;
+        const el = document.getElementById('dockerEventsLiveStatus');
+        if (el) el.textContent = '○ Reconnecting SSE...';
+      };
+    }
+
     async function refreshDockerTabData(opts = {}) {
       if (!canUseBackend()) return;
-      await Promise.all([
-        refreshDockerDiskUsage({ silent: true, skipRender: true }),
-        state.dockerSubTab === 'containers' ? refreshAllContainerStats({ silent: true, skipRender: true }) : Promise.resolve(null)
-      ]);
+      const tasks = [refreshDockerDiskUsage({ silent: true, skipRender: true })];
+      if (state.dockerSubTab === 'containers') tasks.push(refreshAllContainerStats({ silent: true, skipRender: true }));
+      else if (state.dockerSubTab === 'volumes') tasks.push(refreshVolumes({ silent: true, skipRender: true }));
+      else if (state.dockerSubTab === 'networks') tasks.push(refreshNetworks({ silent: true, skipRender: true }));
+      else if (state.dockerSubTab === 'events') tasks.push(refreshDockerEvents({ silent: true, skipRender: true }));
+      await Promise.all(tasks);
       if (state.activeTab === 'docker') renderMainView();
       if (!opts.silent) showToast('Đã đồng bộ trạng thái Docker Engine!', 'success');
     }
@@ -4214,10 +4514,201 @@ volumes:
       `;
     }
 
+    function renderVolumesSection(isMob) {
+      const vols = state.docker.volumes || [];
+      const nv = state.docker.newVol || { name: '', driver: 'local' };
+      const busy = state.docker.busyKey;
+      const unusedCount = vols.filter(v => !v.protected && (!v.inUseBy || v.inUseBy.length === 0)).length;
+      return `
+        <div class="space-y-3">
+          <form onsubmit="createDockerVolume(event)" class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 flex flex-wrap items-center justify-between gap-2.5 shadow-sm">
+            <div class="flex flex-wrap items-center gap-2 flex-1 min-w-[240px]">
+              <input id="dockerNewVolNameInput" type="text" required value="${esc(nv.name || '')}" oninput="state.docker.newVol.name = this.value" placeholder="Tên volume mới (vd: app_uploads)..." class="flex-1 min-w-[180px] px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <input id="dockerNewVolDriverInput" type="text" value="${esc(nv.driver || 'local')}" oninput="state.docker.newVol.driver = this.value" placeholder="local" class="w-24 px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <button type="submit" ${busy ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-60">+ Tạo Volume</button>
+            </div>
+            <button type="button" ${busy || unusedCount === 0 ? 'disabled' : ''} onclick="pruneDockerVolumes()" class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/35 hover:bg-amber-500/25 disabled:opacity-50">
+              Dọn Unused Volumes (${unusedCount})
+            </button>
+          </form>
+
+          <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'} gap-3">
+            ${vols.length === 0 ? `
+              <div class="col-span-full rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center text-xs text-[var(--muted-foreground)]">
+                ${state.docker.loadingVolumes ? 'Đang tải danh sách Docker Volumes...' : 'Chưa có Docker Volume nào.'}
+              </div>
+            ` : vols.map(v => {
+              const inUse = Array.isArray(v.inUseBy) && v.inUseBy.length > 0;
+              return `
+                <div class="rounded-2xl border ${v.protected ? 'border-indigo-500/35 bg-indigo-500/5' : 'border-[var(--border)] bg-[var(--card)]'} p-3.5 space-y-2 shadow-sm">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-1.5">
+                        <span class="text-xs font-mono font-semibold text-[var(--foreground)] truncate">${esc(v.name)}</span>
+                        ${v.protected ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold shrink-0">🛡️ System</span>' : ''}
+                      </div>
+                      <div class="text-[11px] font-mono text-[var(--muted-foreground)] truncate mt-0.5">${esc(v.driver || 'local')} • ${esc(v.mountpoint || '')}</div>
+                    </div>
+                    <span class="text-xs px-2 py-0.5 rounded-lg bg-[var(--content)] border border-[var(--border)] font-mono shrink-0">${v.sizeBytes > 0 ? fmtBytes(v.sizeBytes) : '—'}</span>
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--border)] text-xs">
+                    <div class="flex flex-wrap items-center gap-1">
+                      ${inUse ? v.inUseBy.map(cn => `<span class="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono text-[11px]">${esc(cn)}</span>`).join('') : '<span class="text-[11px] text-amber-400">Chưa gắn container</span>'}
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                      <a href="/api/v1/volumes/${encodeURIComponent(v.name)}/backup" target="_blank" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-[11px] font-medium hover:bg-[var(--accent)]">↓ Backup .tar.gz</a>
+                      ${!v.protected && !inUse ? `<button type="button" ${busy ? 'disabled' : ''} onclick="removeDockerVolume('${esc(v.name)}')" class="text-[11px] text-rose-500 hover:underline font-medium">Xóa</button>` : ''}
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderNetworksSection(isMob) {
+      const nets = state.docker.networks || [];
+      const nn = state.docker.newNet || {};
+      const busy = state.docker.busyKey;
+      const cntOpts = state.containers || [];
+      return `
+        <div class="space-y-3">
+          <form onsubmit="createDockerNetwork(event)" class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-2.5 shadow-sm">
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="dockerNewNetNameInput" type="text" required value="${esc(nn.name || '')}" oninput="state.docker.newNet.name = this.value" placeholder="Tên network mới (vd: app_backend)..." class="flex-1 min-w-[160px] px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <select onchange="state.docker.newNet.driver = this.value" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono">
+                <option value="bridge" ${nn.driver === 'bridge' ? 'selected' : ''}>bridge</option>
+                <option value="overlay" ${nn.driver === 'overlay' ? 'selected' : ''}>overlay</option>
+              </select>
+              <input id="dockerNewNetSubnetInput" type="text" value="${esc(nn.subnet || '')}" oninput="state.docker.newNet.subnet = this.value" placeholder="Subnet (vd 172.28.0.0/16)" class="w-40 px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer select-none">
+                <input type="checkbox" ${nn.internal ? 'checked' : ''} onchange="state.docker.newNet.internal = this.checked" class="rounded" />
+                <span>Internal</span>
+              </label>
+              <button type="submit" ${busy ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-60">+ Tạo Network</button>
+              <button type="button" ${busy ? 'disabled' : ''} onclick="pruneDockerNetworks()" class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/35 hover:bg-amber-500/25 disabled:opacity-60">Dọn Unused</button>
+            </div>
+          </form>
+
+          <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'} gap-3">
+            ${nets.length === 0 ? `
+              <div class="col-span-full rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center text-xs text-[var(--muted-foreground)]">
+                ${state.docker.loadingNetworks ? 'Đang tải danh sách Docker Networks...' : 'Chưa có Docker Network nào.'}
+              </div>
+            ` : nets.map(n => {
+              const attached = Array.isArray(n.containers) ? n.containers : [];
+              const attachVal = (state.docker.connectNet && state.docker.connectNet[n.id]) || '';
+              return `
+                <div class="rounded-2xl border ${n.protected ? 'border-indigo-500/35 bg-indigo-500/5' : 'border-[var(--border)] bg-[var(--card)]'} p-3.5 space-y-2.5 shadow-sm">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="text-xs font-mono font-semibold text-[var(--foreground)]">${esc(n.name)}</span>
+                        <span class="text-[10px] px-1.5 py-0.5 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono">${esc(n.driver || 'bridge')}</span>
+                        ${n.internal ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">Internal</span>' : ''}
+                        ${n.protected ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold">🛡️ System</span>' : ''}
+                      </div>
+                      <div class="text-[11px] font-mono text-[var(--muted-foreground)] mt-0.5">Subnet: ${esc(n.subnet || '-')} • GW: ${esc(n.gateway || '-')}</div>
+                    </div>
+                    ${!n.protected && attached.length === 0 ? `<button type="button" ${busy ? 'disabled' : ''} onclick="removeDockerNetwork('${esc(n.id)}', '${esc(n.name)}')" class="text-xs text-rose-500 hover:underline font-medium shrink-0">Xóa</button>` : ''}
+                  </div>
+
+                  <div class="space-y-1">
+                    ${attached.length === 0 ? '<div class="text-[11px] text-[var(--muted-foreground)]">Chưa có container nào gắn vào network.</div>' : attached.map(ac => `
+                      <div class="flex items-center justify-between gap-2 px-2.5 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)] font-mono text-[11px]">
+                        <span class="truncate text-[var(--foreground)]">${esc(ac.name)} <span class="text-emerald-400">${esc(ac.ipv4 || '')}</span></span>
+                        ${!isProtectedContainer({ name: ac.name }) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="disconnectContainerNetwork('${esc(n.id)}', '${esc(ac.id)}', '${esc(ac.name)}')" class="text-rose-400 hover:underline shrink-0">Detach</button>` : ''}
+                      </div>
+                    `).join('')}
+                  </div>
+
+                  ${n.driver !== 'host' && n.driver !== 'null' ? `
+                    <div class="flex items-center gap-1.5 pt-2 border-t border-[var(--border)]">
+                      <select onchange="state.docker.connectNet['${esc(n.id)}'] = this.value" class="flex-1 px-2.5 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono">
+                        <option value="">Chọn container để attach...</option>
+                        ${cntOpts.map(c => `<option value="${esc(c.id)}" ${attachVal === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                      </select>
+                      <button type="button" ${busy ? 'disabled' : ''} onclick="connectContainerNetwork('${esc(n.id)}')" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-semibold hover:bg-emerald-500/25 shrink-0">+ Attach</button>
+                    </div>
+                  ` : ''}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDockerEventRowsHtml() {
+      const f = state.docker.eventFilter || 'all';
+      const raw = Array.isArray(state.docker.events) ? state.docker.events : [];
+      const list = raw.filter(ev => f === 'all' || ev.type === f).slice().reverse();
+      if (!list.length) {
+        return '<div class="p-8 text-center text-xs text-[var(--muted-foreground)]">Chưa có sự kiện Docker Engine nào khớp bộ lọc.</div>';
+      }
+      return list.map(ev => {
+        const act = String(ev.action || '').toLowerCase();
+        const badgeCls = /die|kill|destroy|delete|oom|stop/.test(act)
+          ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+          : /start|create|unpause|pull|connect/.test(act)
+          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+          : 'bg-sky-500/15 text-sky-400 border-sky-500/30';
+        return `
+          <div class="px-3 py-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="px-1.5 py-0.5 rounded border text-[10px] uppercase font-semibold ${badgeCls}">${esc(ev.type)}:${esc(ev.action)}</span>
+              <span class="font-semibold text-[var(--foreground)] truncate">${esc(ev.actorName || ev.actorId)}</span>
+              <span class="text-[var(--muted-foreground)] truncate">(${esc(ev.actorId)})</span>
+            </div>
+            <span class="text-[var(--muted-foreground)] shrink-0">${esc(ev.timestamp)}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderLiveEventsSection() {
+      const filters = ['all', 'container', 'image', 'volume', 'network'];
+      return `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
+          <div class="p-3 border-b border-[var(--border)] bg-[var(--sidebar)] flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <span id="dockerEventsLiveStatus" class="text-xs font-mono ${state.docker.eventsConnected ? 'text-emerald-400' : 'text-amber-400'}">${state.docker.eventsConnected ? '● Live Events SSE' : '○ Connecting SSE...'}</span>
+              <span class="text-[11px] text-[var(--muted-foreground)]">(${(state.docker.events || []).length} events)</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-1.5">
+              ${filters.map(ft => `
+                <button type="button" onclick="state.docker.eventFilter='${ft}'; renderMainView();" class="px-2.5 py-1 rounded-lg text-xs font-medium capitalize ${state.docker.eventFilter === ft ? 'bg-indigo-500 text-white' : 'bg-[var(--content)] text-[var(--muted-foreground)] border border-[var(--border)]'}">${esc(ft)}</button>
+              `).join('')}
+              <button type="button" onclick="refreshDockerEvents({silent:false})" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-xs font-medium border border-[var(--border)]">↻ Tải lại</button>
+            </div>
+          </div>
+          <div id="dockerEventsFeedHost" class="divide-y divide-[var(--border)] max-h-[420px] overflow-y-auto thin-scroll">
+            ${renderDockerEventRowsHtml()}
+          </div>
+        </div>
+      `;
+    }
+
     function renderDocker(container) {
       const isMob = state.viewport === 'mobile';
       const danglingList = state.images.filter(i => i.dangling);
       const reclaimableMb = danglingList.reduce((acc, i) => acc + i.sizeMb, 0);
+      const subTabs = [
+        { k: 'containers', label: `Containers (${state.containers.length})` },
+        { k: 'images', label: `Images & Cache (${state.images.length})` },
+        { k: 'volumes', label: `Volumes (${(state.docker.volumes || []).length})` },
+        { k: 'networks', label: `Networks (${(state.docker.networks || []).length})` },
+        { k: 'events', label: `Live Events` }
+      ];
+
+      let bodyHtml = '';
+      if (state.dockerSubTab === 'images') bodyHtml = renderImagesSection(isMob, danglingList, reclaimableMb);
+      else if (state.dockerSubTab === 'volumes') bodyHtml = renderVolumesSection(isMob);
+      else if (state.dockerSubTab === 'networks') bodyHtml = renderNetworksSection(isMob);
+      else if (state.dockerSubTab === 'events') bodyHtml = renderLiveEventsSection();
+      else bodyHtml = renderContainersSection(isMob);
 
       container.innerHTML = `
         <div class="space-y-4">
@@ -4225,23 +4716,20 @@ volumes:
             <div class="flex items-center gap-2.5">
               <span class="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-500 flex items-center justify-center shrink-0">${dockerIconSvg('w-5 h-5')}</span>
               <div>
-                <h1 class="text-base font-semibold text-[var(--foreground)]">Quản lý Docker (Containers &amp; Images)</h1>
-                <p class="text-xs text-[var(--muted-foreground)]">Điều khiển runtime qua Docker Engine API • Deep Inspect, Hot Limits, SSE Logs &amp; Prune.</p>
+                <h1 class="text-base font-semibold text-[var(--foreground)]">Quản lý Docker Runtime</h1>
+                <p class="text-xs text-[var(--muted-foreground)]">Containers, Images &amp; Cache, Volumes + Backup, Networks &amp; Realtime Events SSE.</p>
               </div>
             </div>
 
-            <div class="flex items-center gap-1 p-1 rounded-xl bg-[var(--card)] border border-[var(--border)]">
-              <button type="button" onclick="setDockerSubTab('containers')" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition ${state.dockerSubTab === 'containers' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
-                Containers (${state.containers.length})
-              </button>
-              <button type="button" onclick="setDockerSubTab('images')" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition ${state.dockerSubTab === 'images' ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">
-                Images &amp; Cache (${state.images.length})
-              </button>
+            <div class="flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+              ${subTabs.map(st => `
+                <button type="button" onclick="setDockerSubTab('${st.k}')" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold transition ${state.dockerSubTab === st.k ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'}">${esc(st.label)}</button>
+              `).join('')}
             </div>
           </div>
 
           ${renderDockerDiskUsageBanner(isMob)}
-          ${state.dockerSubTab === 'containers' ? renderContainersSection(isMob) : renderImagesSection(isMob, danglingList, reclaimableMb)}
+          ${bodyHtml}
         </div>
       `;
     }

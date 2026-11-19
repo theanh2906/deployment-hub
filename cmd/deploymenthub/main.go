@@ -65,6 +65,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go engine.StartDockerEventWatcher(ctx)
+
 	go func() {
 		log.Printf("[info] DeploymentHub Control Plane listening on http://127.0.0.1%s (mode=%s, docker=%s)",
 			addr, overview.VPS.RuntimeMode, overview.VPS.DockerVersion)

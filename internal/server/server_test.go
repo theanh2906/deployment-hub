@@ -1397,3 +1397,128 @@ func TestDockerDeepEndpointsCheckpoint1(t *testing.T) {
 		}
 	}
 }
+
+func TestDockerResourcesAndEventsCheckpoint2(t *testing.T) {
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+			_, _ = w.Write([]byte("OK"))
+		case r.URL.Path == "/version":
+			_ = json.NewEncoder(w).Encode(map[string]string{"Version": "29.1.3"})
+		case r.URL.Path == "/info":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "cp2-srv", "NCPU": 4, "MemTotal": int64(8) << 30, "ServerVersion": "29.1.3"})
+		case r.URL.Path == "/containers/json" || r.URL.Path == "/images/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.URL.Path == "/system/df":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Volumes": []map[string]any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/volumes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Volumes": []map[string]any{
+					{"Name": "hub_data", "Driver": "local", "Scope": "local"},
+					{"Name": "user_vol", "Driver": "local", "Scope": "local"},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/volumes/create":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "created_vol", "Driver": "local", "Scope": "local"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/volumes/user_vol":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/volumes/prune":
+			_ = json.NewEncoder(w).Encode(map[string]any{"VolumesDeleted": []string{"old_v"}, "SpaceReclaimed": int64(2048)})
+		case r.Method == http.MethodGet && r.URL.Path == "/networks":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": "n_sys", "Name": "bridge", "Driver": "bridge", "Scope": "local", "Containers": map[string]any{}},
+				{"Id": "n_app", "Name": "app_net", "Driver": "bridge", "Scope": "local", "Containers": map[string]any{}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/networks/create":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "n_created"})
+		case r.Method == http.MethodPost && (r.URL.Path == "/networks/n_app/connect" || r.URL.Path == "/networks/n_app/disconnect"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && r.URL.Path == "/networks/n_app":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/networks/prune":
+			_ = json.NewEncoder(w).Encode(map[string]any{"NetworksDeleted": []string{"unused_n"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dockerSrv.Close()
+
+	v, _ := vault.New("cp2-http-test-master-key")
+	eng := docker.NewEngine(dockerSrv.URL, v)
+	eng.RecordDockerEvent(docker.DockerEvent{Type: "container", Action: "start", ActorID: "c1", ActorName: "dh-app", Timestamp: "2026-11-19T12:00:00Z"})
+	h := New(eng, v, "hook", fstest.MapFS{})
+
+	// Volumes endpoints + 403 protected guard
+	if res := doReq(t, h, http.MethodGet, "/api/v1/volumes", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "hub_data") {
+		t.Fatalf("GET /volumes failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/volumes/hub_data", nil, nil); res.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting hub_data, got %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/volumes", map[string]string{"name": "created_vol"}, nil); res.Code != http.StatusCreated {
+		t.Fatalf("POST /volumes failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/volumes/user_vol", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("DELETE /volumes/user_vol failed: %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/volumes/prune", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST /volumes/prune failed: %d", res.Code)
+	}
+
+	// Networks endpoints + 403 protected guard
+	if res := doReq(t, h, http.MethodGet, "/api/v1/networks", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "app_net") {
+		t.Fatalf("GET /networks failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/networks/bridge", nil, nil); res.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting bridge network, got %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/networks", map[string]any{"name": "my_net", "driver": "bridge"}, nil); res.Code != http.StatusCreated {
+		t.Fatalf("POST /networks failed: %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/networks/n_app/connect", map[string]string{"containerId": "c1"}, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST connect failed: %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/networks/n_app/disconnect", map[string]string{"containerId": "c1"}, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST disconnect failed: %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/networks/n_app", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("DELETE /networks/n_app failed: %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/networks/prune", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST /networks/prune failed: %d", res.Code)
+	}
+
+	// Docker Events list & SSE stream
+	if res := doReq(t, h, http.MethodGet, "/api/v1/docker/events", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "dh-app") {
+		t.Fatalf("GET /docker/events failed: %d %s", res.Code, res.Body.String())
+	}
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	sseResp, err := http.Get(ts.URL + "/api/v1/docker/events/stream")
+	if err != nil {
+		t.Fatalf("GET /docker/events/stream failed: %v", err)
+	}
+	defer sseResp.Body.Close()
+	scanner := bufio.NewScanner(sseResp.Body)
+	foundEvent := false
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "dh-app") {
+			foundEvent = true
+			break
+		}
+	}
+	if !foundEvent {
+		t.Fatal("expected initial cached event on /api/v1/docker/events/stream")
+	}
+
+	// Auth enforcement check
+	authMgr := auth.NewManagerWithConfig(v, filepath.Join(t.TempDir(), "auth_cp2.json"), auth.DefaultAdminEmail, true)
+	hAuth := NewWithAuth(eng, v, "hook", fstest.MapFS{}, authMgr)
+	for _, ep := range []string{"/api/v1/volumes", "/api/v1/networks", "/api/v1/docker/events", "/api/v1/docker/events/stream"} {
+		if r401 := doReq(t, hAuth, http.MethodGet, ep, nil, nil); r401.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on %s when auth enforced, got %d", ep, r401.Code)
+		}
+	}
+}

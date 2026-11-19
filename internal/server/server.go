@@ -111,6 +111,19 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	mux.HandleFunc("DELETE /api/v1/images/{id}", s.handleDeleteImage)
 	mux.HandleFunc("GET /api/v1/images/{id}/history", s.handleImageHistory)
 	mux.HandleFunc("POST /api/v1/build-cache/prune", s.handlePruneBuildCache)
+	mux.HandleFunc("GET /api/v1/volumes", s.handleListVolumes)
+	mux.HandleFunc("POST /api/v1/volumes", s.handleCreateVolume)
+	mux.HandleFunc("DELETE /api/v1/volumes/{name}", s.handleDeleteVolume)
+	mux.HandleFunc("POST /api/v1/volumes/prune", s.handlePruneVolumes)
+	mux.HandleFunc("GET /api/v1/volumes/{name}/backup", s.handleBackupVolume)
+	mux.HandleFunc("GET /api/v1/networks", s.handleListNetworks)
+	mux.HandleFunc("POST /api/v1/networks", s.handleCreateNetwork)
+	mux.HandleFunc("DELETE /api/v1/networks/{id}", s.handleDeleteNetwork)
+	mux.HandleFunc("POST /api/v1/networks/{id}/connect", s.handleConnectNetwork)
+	mux.HandleFunc("POST /api/v1/networks/{id}/disconnect", s.handleDisconnectNetwork)
+	mux.HandleFunc("POST /api/v1/networks/prune", s.handlePruneNetworks)
+	mux.HandleFunc("GET /api/v1/docker/events", s.handleListDockerEvents)
+	mux.HandleFunc("GET /api/v1/docker/events/stream", s.handleStreamDockerEvents)
 	mux.HandleFunc("POST /api/v1/proxy/routes/{id}/toggle-ssl", s.handleToggleProxySSL)
 	mux.HandleFunc("POST /api/v1/mock/clean", s.handleClearMockData)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.handleGitHubWebhook)
@@ -1193,6 +1206,228 @@ func (s *apiServer) handlePruneBuildCache(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	vols, err := s.engine.ListVolumes()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"volumes": vols,
+	})
+}
+
+func (s *apiServer) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name   string            `json:"name"`
+		Driver string            `json:"driver"`
+		Labels map[string]string `json:"labels"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	vol, err := s.engine.CreateVolume(req.Name, req.Driver, req.Labels)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, vol)
+}
+
+func (s *apiServer) handleDeleteVolume(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	force := r.URL.Query().Get("force") == "1" || strings.EqualFold(r.URL.Query().Get("force"), "true")
+	if err := s.engine.RemoveVolume(name, force); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted",
+		"name":   name,
+	})
+}
+
+func (s *apiServer) handlePruneVolumes(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.PruneVolumes()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleBackupVolume(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, name)
+	if safeName == "" {
+		safeName = "volume"
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-backup.tar.gz"`, safeName))
+	if err := s.engine.BackupVolumeTarGz(r.Context(), name, w); err != nil {
+		log.Printf("[docker] volume backup %q failed: %v", name, err)
+	}
+}
+
+func (s *apiServer) handleListNetworks(w http.ResponseWriter, r *http.Request) {
+	nets, err := s.engine.ListNetworks()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"networks": nets,
+	})
+}
+
+func (s *apiServer) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name     string `json:"name"`
+		Driver   string `json:"driver"`
+		Subnet   string `json:"subnet"`
+		Gateway  string `json:"gateway"`
+		Internal bool   `json:"internal"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	net, err := s.engine.CreateNetwork(req.Name, req.Driver, req.Subnet, req.Gateway, req.Internal)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, net)
+}
+
+func (s *apiServer) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.engine.RemoveNetwork(id); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted",
+		"id":     id,
+	})
+}
+
+func (s *apiServer) handleConnectNetwork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		ContainerID string `json:"containerId"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.engine.ConnectNetwork(id, req.ContainerID); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "connected",
+		"networkId":   id,
+		"containerId": req.ContainerID,
+	})
+}
+
+func (s *apiServer) handleDisconnectNetwork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		ContainerID string `json:"containerId"`
+		Force       bool   `json:"force"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.engine.DisconnectNetwork(id, req.ContainerID, req.Force); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "disconnected",
+		"networkId":   id,
+		"containerId": req.ContainerID,
+	})
+}
+
+func (s *apiServer) handlePruneNetworks(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.PruneNetworks()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleListDockerEvents(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": s.engine.GetRecentDockerEvents(),
+	})
+}
+
+func (s *apiServer) handleStreamDockerEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	history, ch, unsub := s.engine.SubscribeDockerEvents()
+	defer unsub()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	writeEv := func(ev docker.DockerEvent) bool {
+		payload, err := json.Marshal(ev)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "event: docker_event\ndata: %s\n\n", payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	for _, ev := range history {
+		if !writeEv(ev) {
+			return
+		}
+	}
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			if !writeEv(ev) {
+				return
+			}
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *apiServer) handleToggleProxySSL(w http.ResponseWriter, r *http.Request) {

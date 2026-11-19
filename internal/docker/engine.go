@@ -222,6 +222,10 @@ type Engine struct {
 	discoveredProjectIDs   map[string]bool
 	discoveredImageIDs     map[string]bool
 	seq                    atomic.Uint64
+	eventsMu               sync.Mutex
+	recentEvents           []DockerEvent
+	eventSubs              map[chan DockerEvent]struct{}
+	syncNotifyCh           chan struct{}
 }
 
 // NewEngine initializes the control plane Engine with real host telemetry.
@@ -253,6 +257,9 @@ func NewEngine(dockerHost string, v *vault.Vault) *Engine {
 		discoveredContainerIDs: make(map[string]bool),
 		discoveredProjectIDs:   make(map[string]bool),
 		discoveredImageIDs:     make(map[string]bool),
+		recentEvents:           make([]DockerEvent, 0, 150),
+		eventSubs:              make(map[chan DockerEvent]struct{}),
+		syncNotifyCh:           make(chan struct{}, 1),
 		sslSettings:            defaultSSLSettings(),
 		cf:                     cloudflare.NewManager(v, os.Getenv("CLOUDFLARE_DATA_FILE")),
 		webhookURL:             fmt.Sprintf("http://%s/api/v1/webhooks/github", webhookDomain),
