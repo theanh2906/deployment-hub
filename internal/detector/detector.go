@@ -28,6 +28,7 @@ type DetectRequest struct {
 	RepoURL     string   `json:"repoUrl"`
 	Branch      string   `json:"branch"`
 	Mode        string   `json:"mode"`
+	Token       string   `json:"token,omitempty"`
 	Files       []string `json:"files,omitempty"`
 	PackageJSON string   `json:"packageJson,omitempty"`
 	EnvExample  string   `json:"envExample,omitempty"`
@@ -102,8 +103,8 @@ var presetCatalog = map[string]presetTemplate{
 		EnvVars: []EnvVar{
 			{Key: "NODE_ENV", Value: "production", Secret: false},
 			{Key: "PORT", Value: "3000", Secret: false},
-			{Key: "NEXT_PUBLIC_API_URL", Value: "https://api.anna.dev", Secret: false},
-			{Key: "AUTH_SECRET", Value: "dh_sec_92kfa810x99a", Secret: true},
+			{Key: "NEXT_PUBLIC_API_URL", Value: "/api", Secret: false},
+			{Key: "AUTH_SECRET", Value: "", Secret: true},
 		},
 		DefaultDeps: []string{"openssl", "libc6-compat"},
 		MarkerFiles: []string{"package.json (next 15)", "pnpm-lock.yaml", "next.config.mjs", "prisma/schema.prisma", ".env.example"},
@@ -120,7 +121,7 @@ var presetCatalog = map[string]presetTemplate{
 		Footprint:   "~24 MB",
 		EnvVars: []EnvVar{
 			{Key: "NODE_ENV", Value: "production", Secret: false},
-			{Key: "VITE_API_BASE", Value: "https://api.anna.dev/v1", Secret: false},
+			{Key: "VITE_API_BASE", Value: "/api/v1", Secret: false},
 			{Key: "NGINX_SPA_FALLBACK", Value: "try_files $uri /index.html", Secret: false},
 		},
 		DefaultDeps: []string{"brotli"},
@@ -139,8 +140,8 @@ var presetCatalog = map[string]presetTemplate{
 		EnvVars: []EnvVar{
 			{Key: "GO_ENV", Value: "production", Secret: false},
 			{Key: "PORT", Value: "8080", Secret: false},
-			{Key: "DATABASE_URL", Value: "postgres://app:***@postgres:5432/prod", Secret: true},
-			{Key: "JWT_SIGNING_KEY", Value: "go_jwt_7731a9c4", Secret: true},
+			{Key: "DATABASE_URL", Value: "", Secret: true},
+			{Key: "JWT_SIGNING_KEY", Value: "", Secret: true},
 		},
 		DefaultDeps: []string{"ca-certificates"},
 		MarkerFiles: []string{"go.mod", "go.sum", "cmd/api/main.go", ".env.example"},
@@ -158,7 +159,7 @@ var presetCatalog = map[string]presetTemplate{
 		EnvVars: []EnvVar{
 			{Key: "RUST_LOG", Value: "info,actix_web=info", Secret: false},
 			{Key: "BIND_ADDR", Value: "0.0.0.0:9000", Secret: false},
-			{Key: "REDIS_URL", Value: "redis://redis:6379/0", Secret: true},
+			{Key: "REDIS_URL", Value: "", Secret: true},
 		},
 		DefaultDeps: []string{"pkg-config", "musl-dev", "openssl-dev"},
 		MarkerFiles: []string{"Cargo.toml", "Cargo.lock", "src/main.rs", ".env.example"},
@@ -176,7 +177,7 @@ var presetCatalog = map[string]presetTemplate{
 		EnvVars: []EnvVar{
 			{Key: "COMPOSE_PROJECT_NAME", Value: "fullstack-app", Secret: false},
 			{Key: "POSTGRES_USER", Value: "app_admin", Secret: false},
-			{Key: "POSTGRES_PASSWORD", Value: "pg_s3cur3_9182", Secret: true},
+			{Key: "POSTGRES_PASSWORD", Value: "", Secret: true},
 			{Key: "API_INTERNAL_URL", Value: "http://backend:8080", Secret: false},
 		},
 		DefaultDeps: []string{},
@@ -216,6 +217,17 @@ func Detect(req DetectRequest) DetectResult {
 			envExample = dirEnv
 		}
 		extraManifestText = dirManifests
+	} else if len(scannedFiles) == 0 && strings.TrimSpace(pkgJSON) == "" && strings.TrimSpace(req.RepoURL) != "" {
+		if ghFiles, ghPkg, ghEnv, ghManifests, ok := scanRemoteGitHubRepo(req.RepoURL, req.Branch, req.Token); ok {
+			scannedFiles = ghFiles
+			if strings.TrimSpace(pkgJSON) == "" && ghPkg != "" {
+				pkgJSON = ghPkg
+			}
+			if strings.TrimSpace(envExample) == "" && ghEnv != "" {
+				envExample = ghEnv
+			}
+			extraManifestText = ghManifests
+		}
 	}
 
 	presetKey := ""
@@ -240,8 +252,12 @@ func Detect(req DetectRequest) DetectResult {
 
 	buildCmd := tpl.BuildCmd
 	startCmd := tpl.StartCmd
-	if tpl.Key == "go" && hasFileExact(scannedFiles, "main.go") && !hasPrefixFile(scannedFiles, "cmd/") {
-		buildCmd = `CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server .`
+	if tpl.Key == "go" {
+		if cmdEntry := findGoCmdEntrypoint(scannedFiles); cmdEntry != "" {
+			buildCmd = fmt.Sprintf(`CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server %s`, cmdEntry)
+		} else if hasFileExact(scannedFiles, "main.go") && !hasPrefixFile(scannedFiles, "cmd/") {
+			buildCmd = `CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server .`
+		}
 	}
 	if tpl.Key == "spa" && (hasFileBase(scannedFiles, "angular.json") || strings.Contains(strings.ToLower(pkgJSON), `"@angular/core"`)) {
 		tpl.Label = "Angular SPA"
@@ -279,7 +295,7 @@ func Detect(req DetectRequest) DetectResult {
 	}
 
 	appName := deriveAppName(req.RepoURL, req.LocalDir, tpl.Key)
-	domain := appName + ".anna.dev"
+	domain := appName + ".localhost"
 
 	dockerfile := GenerateDockerfile(DockerfileRequest{
 		PresetKey:   tpl.Key,
@@ -336,7 +352,7 @@ func GenerateDockerfile(req DockerfileRequest) string {
 	}
 	domain := strings.TrimSpace(req.Domain)
 	if domain == "" {
-		domain = appName + ".anna.dev"
+		domain = appName + ".localhost"
 	}
 
 	buildCmd := strings.TrimSpace(req.BuildCmd)
@@ -791,14 +807,15 @@ func detectFromFilesAndManifest(files []string, pkgJSON string) (presetKey strin
 		return false
 	}
 
-	if hasAnyBase("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml") {
-		return "compose", true
-	}
-
 	hasFE := hasSubPathSuffix("/package.json") && (hasAnyPathFragment(lowerFiles, "frontend", "apps/web", "client", "web/"))
 	hasBE := (hasSubPathSuffix("/go.mod", "/cargo.toml", "/requirements.txt", "/pyproject.toml") ||
 		(hasSubPathSuffix("/package.json") && hasAnyPathFragment(lowerFiles, "backend", "apps/api", "server", "api/")))
 	if hasFE && hasBE {
+		return "compose", true
+	}
+
+	hasRootManifest := hasFileExact(lowerFiles, "go.mod") || hasFileExact(lowerFiles, "cargo.toml") || hasFileExact(lowerFiles, "package.json")
+	if !hasRootManifest && hasAnyBase("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml") {
 		return "compose", true
 	}
 
@@ -1211,6 +1228,18 @@ func hasPrefixFile(files []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func findGoCmdEntrypoint(files []string) string {
+	for _, f := range files {
+		norm := filepath.ToSlash(strings.TrimSpace(f))
+		lower := strings.ToLower(norm)
+		if strings.HasPrefix(lower, "cmd/") && strings.HasSuffix(lower, "/main.go") {
+			dir := filepath.ToSlash(filepath.Dir(norm))
+			return "./" + dir
+		}
+	}
+	return ""
 }
 
 func uniqueNonEmpty(in []string) []string {

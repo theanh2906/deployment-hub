@@ -4,21 +4,29 @@
 package docker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"deploymenthub/internal/cloudflare"
 	"deploymenthub/internal/detector"
 	"deploymenthub/internal/vault"
 )
@@ -166,62 +174,118 @@ type deploymentState struct {
 
 // Engine manages projects, containers, images, proxy routes, secrets, and async deployments.
 type Engine struct {
-	mu               sync.RWMutex
-	vault            *vault.Vault
-	vps              VPSStatus
-	projects         []Project
-	containers       []Container
-	images           []DockerImage
-	proxyRoutes      []ProxyRoute
-	webhookURL       string
-	deployments      map[string]*deploymentState
-	encryptedSecrets map[string]string
-	seq              atomic.Uint64
+	mu                     sync.RWMutex
+	vault                  *vault.Vault
+	vps                    VPSStatus
+	projects               []Project
+	containers             []Container
+	images                 []DockerImage
+	proxyRoutes            []ProxyRoute
+	webhookURL             string
+	deployments            map[string]*deploymentState
+	encryptedSecrets       map[string]string
+	manualCleared          bool
+	baseRAMUsed            float64
+	sslSettings            SSLSettings
+	cf                     *cloudflare.Manager
+	discoveredContainerIDs map[string]bool
+	discoveredProjectIDs   map[string]bool
+	discoveredImageIDs     map[string]bool
+	seq                    atomic.Uint64
 }
 
-// NewEngine initializes the control plane Engine. If dockerHost is non-empty and reachable,
-// it runs in "docker" runtimeMode; otherwise it seeds and runs in stateful "simulator" mode.
+// NewEngine initializes the control plane Engine with real host telemetry.
+// If dockerHost is non-empty and reachable, it runs in "docker" runtimeMode
+// and discovers live containers/images; otherwise it runs in clean local mode.
 func NewEngine(dockerHost string, v *vault.Vault) *Engine {
 	if v == nil {
 		v, _ = vault.New("")
 	}
 
+	webhookDomain := "localhost:4180"
+	if d := strings.TrimSpace(os.Getenv("HUB_DOMAIN")); d != "" {
+		webhookDomain = d
+	}
+
+	hostName, _ := os.Hostname()
+	if strings.TrimSpace(hostName) == "" {
+		hostName = "localhost"
+	}
+	sshUser := strings.TrimSpace(os.Getenv("USER"))
+	if sshUser == "" {
+		sshUser = "deploy"
+	}
+
 	e := &Engine{
-		vault:            v,
-		deployments:      make(map[string]*deploymentState),
-		encryptedSecrets: make(map[string]string),
-		webhookURL:       "https://hub.anna.dev/api/webhooks/github/wh_9a81f0c2",
+		vault:                  v,
+		deployments:            make(map[string]*deploymentState),
+		encryptedSecrets:       make(map[string]string),
+		discoveredContainerIDs: make(map[string]bool),
+		discoveredProjectIDs:   make(map[string]bool),
+		discoveredImageIDs:     make(map[string]bool),
+		sslSettings:            defaultSSLSettings(),
+		cf:                     cloudflare.NewManager(v, os.Getenv("CLOUDFLARE_DATA_FILE")),
+		webhookURL:             fmt.Sprintf("http://%s/api/v1/webhooks/github", webhookDomain),
 		vps: VPSStatus{
-			Host:           "vps-sg-01",
-			IP:             "103.184.210.12",
-			CPU:            24,
-			RAMUsed:        3.8,
-			RAMTotal:       8.0,
-			DiskPct:        42,
-			DockerVersion:  "Docker v26.1",
+			Host:           hostName,
+			IP:             "127.0.0.1",
+			CPU:            0,
+			RAMUsed:        0,
+			RAMTotal:       0,
+			DiskPct:        0,
+			DockerVersion:  "N/A",
 			SSHPort:        "22",
-			SSHUser:        "deploy",
-			ConnMode:       "socket-proxy",
-			SocketEndpoint: "tcp://docker-proxy:2375",
-			ConnStatus:     "Connected • 14ms",
+			SSHUser:        sshUser,
+			ConnMode:       "local",
+			SocketEndpoint: "",
+			ConnStatus:     "Local Mode",
 			RuntimeMode:    "simulator",
 		},
+		projects:    make([]Project, 0),
+		containers:  make([]Container, 0),
+		images:      make([]DockerImage, 0),
+		proxyRoutes: make([]ProxyRoute, 0),
 	}
 
 	if host := strings.TrimSpace(dockerHost); host != "" {
 		if ver, ok := probeDockerHost(host); ok {
 			e.vps.RuntimeMode = "docker"
+			e.vps.ConnMode = "socket-proxy"
 			e.vps.SocketEndpoint = host
 			e.vps.ConnStatus = "Connected (Docker Engine)"
 			if ver != "" {
 				e.vps.DockerVersion = "Docker v" + ver
+			} else {
+				e.vps.DockerVersion = "Docker Engine"
 			}
 		}
 	}
 
-	e.seedDefaultState()
-	e.syncVPSRamLocked()
+	e.readHostTelemetry()
+	if e.vps.RuntimeMode == "docker" {
+		e.SyncDockerEngine()
+	}
 	return e
+}
+
+// Cloudflare returns the Engine's thread-safe Cloudflare API v4 Manager.
+func (e *Engine) Cloudflare() *cloudflare.Manager {
+	return e.cf
+}
+
+// ClearMockData resets all projects, containers, images, and proxy routes to empty state.
+func (e *Engine) ClearMockData() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.manualCleared = true
+	e.projects = make([]Project, 0)
+	e.containers = make([]Container, 0)
+	e.images = make([]DockerImage, 0)
+	e.proxyRoutes = make([]ProxyRoute, 0)
+	e.discoveredContainerIDs = make(map[string]bool)
+	e.discoveredProjectIDs = make(map[string]bool)
+	e.discoveredImageIDs = make(map[string]bool)
+	e.syncVPSRamLocked()
 }
 
 func probeDockerHost(dockerHost string) (string, bool) {
@@ -275,282 +339,15 @@ func probeDockerHost(dockerHost string) (string, bool) {
 	return "", true
 }
 
-func (e *Engine) seedDefaultState() {
-	e.projects = []Project{
-		{
-			ID:         "nextjs-commerce-store",
-			Name:       "nextjs-commerce-store",
-			Stack:      "Next.js 15 SSR",
-			StackKey:   "nextjs",
-			Category:   "Frontend",
-			Domain:     "store.anna.dev",
-			Repo:       "anh-tang/nextjs-commerce-store",
-			Branch:     "main",
-			Commit:     "sha-8f92a1",
-			CommitMsg:  "feat: stripe webhook idempotency",
-			Status:     "Running",
-			CPU:        6.2,
-			RAMMb:      210,
-			RAMLimitMb: 512,
-			Port:       "3000",
-			UpdatedAt:  "4 phút trước",
-			Logs: []string{
-				"2026-11-14T01:02:11Z [next] ▲ Next.js 15.1.4 (standalone)",
-				"2026-11-14T01:02:11Z [next] - Local: http://0.0.0.0:3000",
-				"2026-11-14T01:02:12Z [health] GET /api/health 200 OK (3ms)",
-				"2026-11-14T01:05:40Z [http] GET /products/pro-plan 200 in 18ms",
-				"2026-11-14T01:07:03Z [http] POST /api/checkout 200 in 42ms",
-			},
-		},
-		{
-			ID:         "go-payment-gateway",
-			Name:       "go-payment-gateway",
-			Stack:      "Go 1.22 REST API",
-			StackKey:   "go",
-			Category:   "Backend API",
-			Domain:     "api.anna.dev",
-			Repo:       "anh-tang/go-payment-gateway",
-			Branch:     "main",
-			Commit:     "v1.4.2",
-			CommitMsg:  "perf: tune pgx connection pool",
-			Status:     "Running",
-			CPU:        3.4,
-			RAMMb:      28,
-			RAMLimitMb: 256,
-			Port:       "8080",
-			UpdatedAt:  "18 phút trước",
-			Logs: []string{
-				"2026-11-14T00:50:01Z [go-api] Starting payment-gateway v1.4.2 on :8080",
-				"2026-11-14T00:50:01Z [db] Connected PostgreSQL pool (min=4 max=20)",
-				"2026-11-14T01:04:12Z [gin] POST /v1/payments/intent 201 (6.1ms)",
-				"2026-11-14T01:06:55Z [gin] GET /healthz 200 (0.8ms)",
-			},
-		},
-		{
-			ID:         "rust-realtime-engine",
-			Name:       "rust-realtime-engine",
-			Stack:      "Rust Actix-Web",
-			StackKey:   "rust",
-			Category:   "Backend API",
-			Domain:     "ws.anna.dev",
-			Repo:       "anh-tang/rust-realtime-engine",
-			Branch:     "feat/ws-cluster",
-			Commit:     "c47e12a",
-			CommitMsg:  "optimize epoll worker threads",
-			Status:     "Building...",
-			CPU:        41.0,
-			RAMMb:      640,
-			RAMLimitMb: 1024,
-			Port:       "9000",
-			UpdatedAt:  "Đang build Stage 3/5",
-			Logs: []string{
-				"2026-11-14T01:08:10Z [build] Cloning feat/ws-cluster @ c47e12a",
-				"2026-11-14T01:08:14Z [cargo] Downloading crates (actix-web 4.9, tokio 1.41)",
-				"2026-11-14T01:08:32Z [cargo] Compiling rust-realtime-engine v0.9.5 (release)",
-				"2026-11-14T01:08:51Z [cargo] Linking static musl binary...",
-			},
-		},
-		{
-			ID:         "crm-fullstack-monorepo",
-			Name:       "crm-fullstack-monorepo",
-			Stack:      "Angular 18 FE + Go BE + Postgres",
-			StackKey:   "compose",
-			Category:   "Full-stack Compose",
-			Domain:     "crm.anna.dev",
-			Repo:       "anh-tang/crm-fullstack-monorepo",
-			Branch:     "production",
-			Commit:     "7a20f9c",
-			CommitMsg:  "compose: add healthchecks & internal net",
-			Status:     "Running",
-			CPU:        9.1,
-			RAMMb:      480,
-			RAMLimitMb: 1024,
-			Port:       "80 / 8080",
-			UpdatedAt:  "1 giờ trước",
-			Logs: []string{
-				"2026-11-14T00:12:04Z [compose] Network crm_internal ready",
-				"2026-11-14T00:12:06Z [postgres] database system is ready to accept connections",
-				"2026-11-14T00:12:08Z [crm-be] Go API listening on :8080",
-				"2026-11-14T00:12:09Z [crm-fe] Nginx serving Angular 18 dist on :80",
-			},
-		},
-		{
-			ID:         "react-admin-portal",
-			Name:       "react-admin-portal",
-			Stack:      "React + Vite SPA",
-			StackKey:   "spa",
-			Category:   "Frontend",
-			Domain:     "admin.anna.dev",
-			Repo:       "anh-tang/react-admin-portal",
-			Branch:     "main",
-			Commit:     "91d4e21",
-			CommitMsg:  "chore: upgrade vite 5.4 & router",
-			Status:     "Stopped",
-			CPU:        0,
-			RAMMb:      0,
-			RAMLimitMb: 128,
-			Port:       "80",
-			UpdatedAt:  "2 ngày trước",
-			Logs: []string{
-				"2026-11-12T14:20:01Z [nginx] 1.27.2 worker processes started",
-				"2026-11-12T18:05:19Z [docker] Container stopped by user @anh-tang (SIGTERM)",
-			},
-		},
-	}
-
-	e.containers = []Container{
-		{
-			ID:           "cnt-next",
-			Name:         "dh-nextjs-commerce-store",
-			Project:      "nextjs-commerce-store",
-			StackKey:     "nextjs",
-			Image:        "nextjs-commerce:sha-8f92a1",
-			PreviousTags: []string{"nextjs-commerce:sha-7c10b4", "nextjs-commerce:sha-60e219"},
-			Status:       "Running",
-			CPUPct:       6.2,
-			RAMMb:        210,
-			RAMLimitMb:   512,
-			Ports:        "127.0.0.1:3000->3000/tcp",
-			Uptime:       "Up 4 phút",
-			Logs: []string{
-				"[next] ▲ Next.js 15.1.4 Ready in 312ms",
-				"[http] GET / 200 12ms",
-				"[http] GET /api/cart 200 7ms",
-				"[http] POST /api/checkout 200 41ms",
-			},
-		},
-		{
-			ID:           "cnt-go",
-			Name:         "dh-go-payment-gateway",
-			Project:      "go-payment-gateway",
-			StackKey:     "go",
-			Image:        "go-payment:v1.4.2",
-			PreviousTags: []string{"go-payment:v1.4.1", "go-payment:v1.4.0"},
-			Status:       "Running",
-			CPUPct:       3.4,
-			RAMMb:        28,
-			RAMLimitMb:   256,
-			Ports:        "127.0.0.1:8080->8080/tcp",
-			Uptime:       "Up 18 phút",
-			Logs: []string{
-				"[go] Server listening :8080 (distroless)",
-				"[pgx] Pool healthy: 4 idle, 1 active",
-				"[http] POST /v1/payments/intent 201 5.9ms",
-			},
-		},
-		{
-			ID:           "cnt-rust",
-			Name:         "dh-rust-realtime-engine",
-			Project:      "rust-realtime-engine",
-			StackKey:     "rust",
-			Image:        "rust-engine:latest",
-			PreviousTags: []string{"rust-engine:v0.9.4", "rust-engine:v0.9.3"},
-			Status:       "Running",
-			CPUPct:       8.5,
-			RAMMb:        44,
-			RAMLimitMb:   256,
-			Ports:        "127.0.0.1:9000->9000/tcp",
-			Uptime:       "Up 3 giờ (Blue-Green active)",
-			Logs: []string{
-				"[actix] Starting 4 worker threads on 0.0.0.0:9000",
-				"[ws] Active WebSocket clients: 312",
-				"[ws] Heartbeat latency avg: 1.4ms",
-			},
-		},
-		{
-			ID:           "cnt-crm-fe",
-			Name:         "dh-crm-fe-angular",
-			Project:      "crm-fullstack-monorepo",
-			StackKey:     "spa",
-			Image:        "crm-fe:7a20f9c",
-			PreviousTags: []string{"crm-fe:6d11a0e"},
-			Status:       "Running",
-			CPUPct:       1.2,
-			RAMMb:        18,
-			RAMLimitMb:   128,
-			Ports:        "crm_net:80/tcp",
-			Uptime:       "Up 1 giờ",
-			Logs: []string{
-				"[nginx] GET /assets/main-B4k1.js 200",
-				"[nginx] Proxy /api/* -> http://dh-crm-be-go:8080",
-			},
-		},
-		{
-			ID:           "cnt-crm-be",
-			Name:         "dh-crm-be-go",
-			Project:      "crm-fullstack-monorepo",
-			StackKey:     "go",
-			Image:        "crm-be:7a20f9c",
-			PreviousTags: []string{"crm-be:6d11a0e"},
-			Status:       "Running",
-			CPUPct:       4.1,
-			RAMMb:        62,
-			RAMLimitMb:   512,
-			Ports:        "crm_net:8080/tcp",
-			Uptime:       "Up 1 giờ",
-			Logs: []string{
-				"[crm-be] Migrated 14 SQL tables cleanly",
-				"[crm-be] GET /api/customers 200 (9ms)",
-			},
-		},
-		{
-			ID:           "cnt-crm-db",
-			Name:         "dh-crm-postgres-16",
-			Project:      "crm-fullstack-monorepo",
-			StackKey:     "compose",
-			Image:        "postgres:16-alpine",
-			PreviousTags: []string{"postgres:16.3-alpine"},
-			Status:       "Running",
-			CPUPct:       3.8,
-			RAMMb:        400,
-			RAMLimitMb:   1024,
-			Ports:        "crm_net:5432/tcp (Internal)",
-			Uptime:       "Up 1 giờ",
-			Logs: []string{
-				"[pg] checkpoint complete: wrote 18 buffers (0.1%)",
-				"[pg] autovacuum launcher started",
-			},
-		},
-		{
-			ID:           "cnt-react",
-			Name:         "dh-react-admin-portal",
-			Project:      "react-admin-portal",
-			StackKey:     "spa",
-			Image:        "react-admin:91d4e21",
-			PreviousTags: []string{"react-admin:82a0b12"},
-			Status:       "Stopped",
-			CPUPct:       0,
-			RAMMb:        0,
-			RAMLimitMb:   128,
-			Ports:        "127.0.0.1:8088->80/tcp",
-			Uptime:       "Exited (0) 2 ngày trước",
-			Logs: []string{
-				"[nginx] graceful shutdown complete",
-				"[docker] Container exited with code 0",
-			},
-		},
-	}
-
-	e.images = []DockerImage{
-		{ID: "img-next", RepoTag: "nextjs-commerce:sha-8f92a1", SizeMb: 148, InUse: true, Dangling: false, Created: "4 phút trước", History: []string{"sha-8f92a1", "sha-7c10b4", "sha-60e219"}},
-		{ID: "img-go", RepoTag: "go-payment:v1.4.2", SizeMb: 19, InUse: true, Dangling: false, Created: "18 phút trước", History: []string{"v1.4.2", "v1.4.1", "v1.4.0"}},
-		{ID: "img-rust", RepoTag: "rust-engine:latest", SizeMb: 24, InUse: true, Dangling: false, Created: "3 giờ trước", History: []string{"latest", "v0.9.4", "v0.9.3"}},
-		{ID: "img-pg", RepoTag: "postgres:16-alpine", SizeMb: 242, InUse: true, Dangling: false, Created: "6 ngày trước", History: []string{"16-alpine"}},
-		{ID: "img-dangle-1", RepoTag: "<none>:<none>", Note: "Dangling Next.js build layer", SizeMb: 640, InUse: false, Dangling: true, Created: "2 giờ trước", History: []string{"<none>"}},
-		{ID: "img-dangle-2", RepoTag: "<none>:<none>", Note: "Dangling Rust cargo cache layer", SizeMb: 540, InUse: false, Dangling: true, Created: "1 ngày trước", History: []string{"<none>"}},
-	}
-
-	e.proxyRoutes = []ProxyRoute{
-		{ID: "rt-1", Domain: "store.anna.dev", Target: "dh-nextjs-commerce-store:3000", PathRule: "/*", SSL: true, CertExp: "84 ngày", Protocol: "HTTP/2 + TLS 1.3"},
-		{ID: "rt-2", Domain: "api.anna.dev", Target: "dh-go-payment-gateway:8080", PathRule: "/*", SSL: true, CertExp: "72 ngày", Protocol: "HTTP/2 + TLS 1.3"},
-		{ID: "rt-3", Domain: "ws.anna.dev", Target: "dh-rust-realtime-engine:9000", PathRule: "/ws", SSL: true, CertExp: "89 ngày", Protocol: "WSS + TLS 1.3"},
-		{ID: "rt-4", Domain: "crm.anna.dev", Target: "FE :80 & /api/* → BE :8080", PathRule: "/ , /api/*", SSL: true, CertExp: "61 ngày", Protocol: "HTTP/2 + TLS 1.3"},
-		{ID: "rt-5", Domain: "admin.anna.dev", Target: "dh-react-admin-portal:80", PathRule: "/*", SSL: false, CertExp: "Chưa cấp", Protocol: "HTTP Only"},
-	}
-}
-
 // GetOverview returns a thread-safe deep snapshot of the entire control plane state.
 func (e *Engine) GetOverview() Overview {
+	e.mu.RLock()
+	shouldSync := e.vps.RuntimeMode == "docker" && !e.manualCleared && strings.TrimSpace(e.vps.SocketEndpoint) != ""
+	e.mu.RUnlock()
+	if shouldSync {
+		e.SyncDockerEngine()
+	}
+
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -581,6 +378,28 @@ func (e *Engine) GetOverview() Overview {
 // RedeployProject triggers an immediate zero-downtime redeploy on the matching project
 // and updates its commit hash, container status, logs, and VPS memory telemetry.
 func (e *Engine) RedeployProject(id string) (Project, error) {
+	e.mu.RLock()
+	pIdx := e.findProjectIndexLocked(id)
+	var projName, runtimeMode, endpoint string
+	var cntIDs []string
+	if pIdx >= 0 {
+		projName = e.projects[pIdx].Name
+		runtimeMode = e.vps.RuntimeMode
+		endpoint = e.vps.SocketEndpoint
+		for _, c := range e.containers {
+			if c.Project == projName {
+				cntIDs = append(cntIDs, c.ID)
+			}
+		}
+	}
+	e.mu.RUnlock()
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
+		for _, cid := range cntIDs {
+			sendDockerContainerAction(endpoint, cid, "restart")
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -628,6 +447,33 @@ func (e *Engine) RedeployProject(id string) (Project, error) {
 // RestartProject toggles a Stopped project to Running or restarts a Running project,
 // syncing associated containers and VPS RAM usage.
 func (e *Engine) RestartProject(id string) (Project, error) {
+	e.mu.RLock()
+	pIdx := e.findProjectIndexLocked(id)
+	var projName, projStatus, runtimeMode, endpoint string
+	var cntIDs []string
+	if pIdx >= 0 {
+		projName = e.projects[pIdx].Name
+		projStatus = e.projects[pIdx].Status
+		runtimeMode = e.vps.RuntimeMode
+		endpoint = e.vps.SocketEndpoint
+		for _, c := range e.containers {
+			if c.Project == projName {
+				cntIDs = append(cntIDs, c.ID)
+			}
+		}
+	}
+	e.mu.RUnlock()
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
+		act := "restart"
+		if projStatus == "Stopped" {
+			act = "start"
+		}
+		for _, cid := range cntIDs {
+			sendDockerContainerAction(endpoint, cid, act)
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -688,16 +534,37 @@ func (e *Engine) RestartProject(id string) (Project, error) {
 // ContainerAction executes start, stop, restart, or rollback on a container
 // and synchronizes its parent project and VPS RAM usage.
 func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error) {
+	act := strings.ToLower(strings.TrimSpace(action))
+	switch act {
+	case "stop", "start", "restart", "rollback":
+	default:
+		return Container{}, fmt.Errorf("unsupported container action %q", action)
+	}
+
+	e.mu.RLock()
+	idx := e.findContainerIndexLocked(id)
+	if idx < 0 {
+		e.mu.RUnlock()
+		return Container{}, fmt.Errorf("container %q not found", id)
+	}
+	dockerID := e.containers[idx].ID
+	runtimeMode := e.vps.RuntimeMode
+	endpoint := e.vps.SocketEndpoint
+	e.mu.RUnlock()
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" && (act == "start" || act == "stop" || act == "restart") {
+		sendDockerContainerAction(endpoint, dockerID, act)
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	idx := e.findContainerIndexLocked(id)
+	idx = e.findContainerIndexLocked(id)
 	if idx < 0 {
 		return Container{}, fmt.Errorf("container %q not found", id)
 	}
 
 	c := &e.containers[idx]
-	act := strings.ToLower(strings.TrimSpace(action))
 
 	switch act {
 	case "stop":
@@ -751,9 +618,6 @@ func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error
 		}
 		c.Uptime = "Up (Rollback vừa xong)"
 		c.Logs = append(c.Logs, fmt.Sprintf("[rollback] Switched image %s -> %s (zero-downtime)", oldTag, tag))
-
-	default:
-		return Container{}, fmt.Errorf("unsupported container action %q", action)
 	}
 
 	e.syncProjectFromContainersLocked(c.Project)
@@ -847,19 +711,35 @@ func (e *Engine) VerifyPAT(token, repoURL string) (map[string]any, error) {
 	previewLen := min(24, len(enc))
 	preview := enc[:previewLen] + "..."
 
+	scopes := []string{"repo", "read:user", "admin:repo_hook"}
+	ghUser := ""
+	if !isSyntheticTestRepo(repoURL) {
+		if login, ghScopes, ok := probeGitHubToken(trimmed); ok {
+			ghUser = login
+			if len(ghScopes) > 0 {
+				scopes = ghScopes
+			}
+		}
+	}
+
 	detectRes := detector.Detect(detector.DetectRequest{
 		RepoURL: repoURL,
 		Branch:  "main",
 		Mode:    "hybrid",
+		Token:   trimmed,
 	})
 
-	return map[string]any{
+	out := map[string]any{
 		"valid":                 true,
 		"encryptedTokenPreview": preview,
 		"repo":                  repoURL,
-		"scopes":                []string{"repo", "read:user", "admin:repo_hook"},
+		"scopes":                scopes,
 		"detectResult":          detectRes,
-	}, nil
+	}
+	if ghUser != "" {
+		out["githubUser"] = ghUser
+	}
+	return out, nil
 }
 
 // StartDeployment validates the deploy request, encrypts secrets via Vault,
@@ -894,7 +774,13 @@ func (e *Engine) StartDeployment(req DeployRequest) (DeploymentRecord, error) {
 	}
 	domain := strings.TrimSpace(req.Domain)
 	if domain == "" {
-		domain = appName + ".anna.dev"
+		if cfCfg := e.cf.GetSanitizedConfig(); cfCfg.Enabled && cfCfg.BaseDomain != "" {
+			domain = appName + "." + cfCfg.BaseDomain
+		} else if hubDomain := strings.TrimSpace(os.Getenv("HUB_DOMAIN")); hubDomain != "" {
+			domain = appName + "." + hubDomain
+		} else {
+			domain = appName + ".localhost"
+		}
 	}
 	detectMode := strings.ToLower(strings.TrimSpace(req.DetectMode))
 	if detectMode != "file" {
@@ -905,6 +791,7 @@ func (e *Engine) StartDeployment(req DeployRequest) (DeploymentRecord, error) {
 		RepoURL: repoURL,
 		Branch:  branch,
 		Mode:    detectMode,
+		Token:   strings.TrimSpace(req.PAT),
 	})
 
 	resolvedPreset := presetKey
@@ -1012,13 +899,26 @@ func (e *Engine) StartDeployment(req DeployRequest) (DeploymentRecord, error) {
 }
 
 func (e *Engine) runDeploymentPipeline(dep *deploymentState, req DeployRequest, secrets []string) {
+	e.mu.RLock()
+	isDocker := e.vps.RuntimeMode == "docker" && strings.TrimSpace(e.vps.SocketEndpoint) != ""
+	endpoint := e.vps.SocketEndpoint
+	e.mu.RUnlock()
+
+	if isDocker && !isSyntheticTestRepo(req.RepoURL) {
+		e.runRealDockerDeployment(dep, req, endpoint, secrets)
+		return
+	}
+
+	commitSHA, commitMsg := fetchLatestGitHubCommit(req.RepoURL, req.Branch, strings.TrimSpace(req.PAT))
+	cloneDetail := fmt.Sprintf("[1/5] Clone SCM repository %s (%s) -> HEAD %s (%s)", req.RepoURL, req.Branch, commitSHA, commitMsg)
+
 	stageLogs := []struct {
 		stage int
 		line  string
 	}{
-		{1, fmt.Sprintf("[1/5] Clone SCM repository %s (%s) cleanly...", req.RepoURL, req.Branch)},
+		{1, cloneDetail},
 		{2, fmt.Sprintf("[2/5] Auto-Generate %s config (%s mode) completed", presetMetaFor(req.PresetKey).filename, req.DetectMode)},
-		{3, fmt.Sprintf("[3/5] Docker Build Image %s:latest with BuildKit cache...", req.AppName)},
+		{3, fmt.Sprintf("[3/5] Docker Build Image %s:%s with BuildKit cache...", req.AppName, commitSHA)},
 		{4, fmt.Sprintf("[4/5] Healthcheck Container dh-%s on port %s -> 200 OK", req.AppName, extractPrimaryPort(req.PortMapping))},
 		{5, fmt.Sprintf("[5/5] Traefik Auto-SSL Let's Encrypt active for https://%s!", req.Domain)},
 	}
@@ -1041,7 +941,7 @@ func (e *Engine) runDeploymentPipeline(dep *deploymentState, req DeployRequest, 
 			dep.mu.Lock()
 			priorLogs := slices.Clone(dep.record.Logs)
 			dep.mu.Unlock()
-			e.registerCompletedDeployment(req, priorLogs, safeLine)
+			e.registerCompletedDeployment(req, commitSHA, commitMsg, priorLogs, safeLine)
 		}
 
 		ev := DeployEvent{
@@ -1075,10 +975,16 @@ func (e *Engine) runDeploymentPipeline(dep *deploymentState, req DeployRequest, 
 	}
 }
 
-func (e *Engine) registerCompletedDeployment(req DeployRequest, priorLogs []string, finalLine string) {
+func (e *Engine) registerCompletedDeployment(req DeployRequest, commitSHA, commitMsg string, priorLogs []string, finalLine string) {
 	meta := presetMetaFor(req.PresetKey)
 	portNum := extractPrimaryPort(req.PortMapping)
-	commit := "sha-" + shortHex(3)
+	commit := strings.TrimSpace(commitSHA)
+	if commit == "" {
+		commit = "sha-" + shortHex(3)
+	}
+	if strings.TrimSpace(commitMsg) == "" {
+		commitMsg = "deployed via DeploymentHub pipeline"
+	}
 	repoTag := fmt.Sprintf("%s:%s", req.AppName, commit)
 	containerName := "dh-" + req.AppName
 
@@ -1099,6 +1005,7 @@ func (e *Engine) registerCompletedDeployment(req DeployRequest, priorLogs []stri
 		p.Repo = req.RepoURL
 		p.Branch = req.Branch
 		p.Commit = commit
+		p.CommitMsg = commitMsg
 		p.Status = "Running"
 		p.Port = portNum
 		p.UpdatedAt = "Vừa xong"
@@ -1114,7 +1021,7 @@ func (e *Engine) registerCompletedDeployment(req DeployRequest, priorLogs []stri
 			Repo:       req.RepoURL,
 			Branch:     req.Branch,
 			Commit:     commit,
-			CommitMsg:  "deployed via DeploymentHub pipeline",
+			CommitMsg:  commitMsg,
 			Status:     "Running",
 			CPU:        2.8,
 			RAMMb:      meta.ramMb,
@@ -1355,7 +1262,161 @@ func (e *Engine) syncVPSRamLocked() {
 			runningMb += c.RAMMb
 		}
 	}
-	e.vps.RAMUsed = math.Round((3.04+float64(runningMb)/1024.0)*10) / 10
+	if e.vps.RuntimeMode == "docker" && e.baseRAMUsed > 0 {
+		e.vps.RAMUsed = e.baseRAMUsed
+		return
+	}
+	e.vps.RAMUsed = math.Round((e.baseRAMUsed+float64(runningMb)/1024.0)*10) / 10
+}
+
+func (e *Engine) readHostTelemetry() {
+	hostName, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostName) == "" {
+		hostName = "localhost"
+	}
+
+	ramTotal, ramUsed := readProcMemInfoGB()
+	cpus := runtime.NumCPU()
+	if cpus < 1 {
+		cpus = 1
+	}
+
+	e.mu.RLock()
+	runtimeMode := e.vps.RuntimeMode
+	endpoint := e.vps.SocketEndpoint
+	e.mu.RUnlock()
+
+	var dockerInfo struct {
+		Name          string `json:"Name"`
+		NCPU          int    `json:"NCPU"`
+		MemTotal      int64  `json:"MemTotal"`
+		ServerVersion string `json:"ServerVersion"`
+	}
+	hasDockerInfo := false
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
+		if client, baseURL, ok := newDockerHTTPClient(endpoint, 1500*time.Millisecond); ok {
+			dockerInfo, hasDockerInfo = fetchDockerJSON[struct {
+				Name          string `json:"Name"`
+				NCPU          int    `json:"NCPU"`
+				MemTotal      int64  `json:"MemTotal"`
+				ServerVersion string `json:"ServerVersion"`
+			}](client, baseURL+"/info")
+		}
+	}
+
+	if hasDockerInfo {
+		if strings.TrimSpace(dockerInfo.Name) != "" {
+			hostName = strings.TrimSpace(dockerInfo.Name)
+		}
+		if dockerInfo.NCPU > 0 {
+			cpus = dockerInfo.NCPU
+		}
+		if dockerInfo.MemTotal > 0 {
+			ramTotal = math.Round((float64(dockerInfo.MemTotal)/(1024*1024*1024))*10) / 10
+		}
+	}
+
+	cpuPct := readProcCPUPct(cpus)
+	diskPct := readRootDiskPct()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vps.Host = hostName
+	e.vps.CPU = cpuPct
+	e.vps.DiskPct = diskPct
+	if ramTotal > 0 {
+		e.vps.RAMTotal = ramTotal
+	}
+	if ramUsed > 0 {
+		e.baseRAMUsed = ramUsed
+		e.vps.RAMUsed = ramUsed
+	}
+	if hasDockerInfo && strings.TrimSpace(dockerInfo.ServerVersion) != "" {
+		e.vps.DockerVersion = "Docker v" + strings.TrimSpace(dockerInfo.ServerVersion)
+	}
+	e.syncVPSRamLocked()
+}
+
+func readProcMemInfoGB() (totalGB float64, usedGB float64) {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	var memTotalKB, memAvailKB, memFreeKB, buffersKB, cachedKB int64
+	hasAvail := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			memTotalKB = val
+		case "MemAvailable:":
+			memAvailKB = val
+			hasAvail = true
+		case "MemFree:":
+			memFreeKB = val
+		case "Buffers:":
+			buffersKB = val
+		case "Cached:":
+			cachedKB = val
+		}
+	}
+	if memTotalKB <= 0 {
+		return 0, 0
+	}
+	if !hasAvail {
+		memAvailKB = memFreeKB + buffersKB + cachedKB
+	}
+	if memAvailKB > memTotalKB {
+		memAvailKB = memTotalKB
+	}
+	usedKB := memTotalKB - memAvailKB
+	totalGB = math.Round((float64(memTotalKB)/(1024*1024))*10) / 10
+	usedGB = math.Round((float64(usedKB)/(1024*1024))*10) / 10
+	return totalGB, usedGB
+}
+
+func readProcCPUPct(numCPU int) float64 {
+	raw, err := os.ReadFile("/proc/loadavg")
+	if err != nil || numCPU <= 0 {
+		return 0
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return 0
+	}
+	load1, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || load1 < 0 {
+		return 0
+	}
+	pct := (load1 / float64(numCPU)) * 100.0
+	if pct > 100.0 {
+		pct = 100.0
+	}
+	return math.Round(pct*10) / 10
+}
+
+func readRootDiskPct() int {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs("/", &st); err != nil || st.Blocks == 0 {
+		return 0
+	}
+	total := float64(st.Blocks)
+	free := float64(st.Bfree)
+	usedPct := ((total - free) / total) * 100.0
+	if usedPct < 0 {
+		return 0
+	}
+	if usedPct > 100 {
+		return 100
+	}
+	return int(math.Round(usedPct))
 }
 
 type presetMeta struct {
@@ -1448,4 +1509,794 @@ func cloneImage(img DockerImage) DockerImage {
 func cloneDeploymentRecord(r DeploymentRecord) DeploymentRecord {
 	r.Logs = slices.Clone(r.Logs)
 	return r
+}
+
+type dockerAPIContainerPort struct {
+	IP          string `json:"IP"`
+	PrivatePort uint16 `json:"PrivatePort"`
+	PublicPort  uint16 `json:"PublicPort"`
+	Type        string `json:"Type"`
+}
+
+type dockerAPIContainer struct {
+	Id     string                   `json:"Id"`
+	Names  []string                 `json:"Names"`
+	Image  string                   `json:"Image"`
+	State  string                   `json:"State"`
+	Status string                   `json:"Status"`
+	Ports  []dockerAPIContainerPort `json:"Ports"`
+	Labels map[string]string        `json:"Labels"`
+}
+
+type dockerAPIImage struct {
+	Id          string   `json:"Id"`
+	RepoTags    []string `json:"RepoTags"`
+	RepoDigests []string `json:"RepoDigests"`
+	Created     int64    `json:"Created"`
+	Size        int64    `json:"Size"`
+	Containers  int64    `json:"Containers"`
+}
+
+// SyncDockerEngine queries the live Docker Engine API for containers and images
+// when running in "docker" runtimeMode (unless ClearMockData was invoked).
+func (e *Engine) SyncDockerEngine() {
+	e.mu.RLock()
+	runtimeMode := e.vps.RuntimeMode
+	manualCleared := e.manualCleared
+	endpoint := e.vps.SocketEndpoint
+	e.mu.RUnlock()
+
+	if runtimeMode != "docker" || manualCleared || strings.TrimSpace(endpoint) == "" {
+		return
+	}
+
+	e.readHostTelemetry()
+
+	client, baseURL, ok := newDockerHTTPClient(endpoint, 1500*time.Millisecond)
+	if !ok {
+		return
+	}
+
+	apiContainers, ok := fetchDockerJSON[[]dockerAPIContainer](client, baseURL+"/containers/json?all=1")
+	if !ok {
+		return
+	}
+
+	logsByID := make(map[string][]string, len(apiContainers))
+	for _, dc := range apiContainers {
+		cid := shortDockerID(dc.Id)
+		if lines := fetchDockerContainerLogs(client, baseURL, dc.Id, 25); len(lines) > 0 {
+			logsByID[cid] = lines
+		}
+	}
+
+	apiImages, hasImages := fetchDockerJSON[[]dockerAPIImage](client, baseURL+"/images/json")
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.vps.RuntimeMode != "docker" || e.manualCleared {
+		return
+	}
+
+	e.applyDiscoveredContainersLocked(apiContainers, logsByID)
+	if hasImages {
+		e.applyDiscoveredImagesLocked(apiImages)
+	}
+	e.syncVPSRamLocked()
+}
+
+// GetContainerLogs returns live container logs from the Docker Engine API (or cached logs in simulator mode).
+func (e *Engine) GetContainerLogs(id string, tail int) ([]string, error) {
+	if tail <= 0 || tail > 500 {
+		tail = 100
+	}
+	e.mu.RLock()
+	runtimeMode := e.vps.RuntimeMode
+	endpoint := e.vps.SocketEndpoint
+	cntIdx := e.findContainerIndexLocked(id)
+	projIdx := e.findProjectIndexLocked(id)
+	var targetDockerID string
+	var cachedLogs []string
+	if cntIdx >= 0 {
+		targetDockerID = e.containers[cntIdx].ID
+		cachedLogs = slices.Clone(e.containers[cntIdx].Logs)
+	} else if projIdx >= 0 {
+		cachedLogs = slices.Clone(e.projects[projIdx].Logs)
+		for _, c := range e.containers {
+			if c.Project == e.projects[projIdx].Name {
+				targetDockerID = c.ID
+				break
+			}
+		}
+	}
+	e.mu.RUnlock()
+
+	if cntIdx < 0 && projIdx < 0 {
+		return nil, fmt.Errorf("container or project %q not found", id)
+	}
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" && targetDockerID != "" {
+		if client, baseURL, ok := newDockerHTTPClient(endpoint, 2*time.Second); ok {
+			if live := fetchDockerContainerLogs(client, baseURL, targetDockerID, tail); len(live) > 0 {
+				e.mu.Lock()
+				if ci := e.findContainerIndexLocked(targetDockerID); ci >= 0 {
+					e.containers[ci].Logs = slices.Clone(live)
+				}
+				if projIdx >= 0 && projIdx < len(e.projects) {
+					e.projects[projIdx].Logs = slices.Clone(live)
+				}
+				e.mu.Unlock()
+				return live, nil
+			}
+		}
+	}
+	return cachedLogs, nil
+}
+
+func (e *Engine) applyDiscoveredContainersLocked(apiContainers []dockerAPIContainer, logsByID map[string][]string) {
+	existingByID := make(map[string]Container, len(e.containers))
+	existingByName := make(map[string]Container, len(e.containers))
+	for _, c := range e.containers {
+		existingByID[c.ID] = c
+		existingByName[c.Name] = c
+	}
+
+	discoveredContainers := make([]Container, 0, len(apiContainers))
+	newDiscoveredIDs := make(map[string]bool, len(apiContainers))
+	matchedNonDiscovered := make(map[string]bool)
+
+	type projectGroup struct {
+		name         string
+		isCompose    bool
+		containers   []Container
+		primaryPorts []string
+		domain       string
+		repo         string
+		branch       string
+		commit       string
+		logs         []string
+	}
+	groupsByName := make(map[string]*projectGroup)
+	groupOrder := make([]string, 0)
+	discoveredRoutes := make([]ProxyRoute, 0)
+	seenRouteDomains := make(map[string]bool)
+
+	for _, dc := range apiContainers {
+		cid := shortDockerID(dc.Id)
+		cname := cid
+		if len(dc.Names) > 0 {
+			if trimmed := strings.TrimPrefix(strings.TrimSpace(dc.Names[0]), "/"); trimmed != "" {
+				cname = trimmed
+			}
+		}
+
+		composeProj := strings.TrimSpace(dc.Labels["com.docker.compose.project"])
+		projName := composeProj
+		if projName == "" {
+			projName = cname
+		}
+
+		status := "Stopped"
+		if strings.EqualFold(dc.State, "running") {
+			status = "Running"
+		}
+		uptime := strings.TrimSpace(dc.Status)
+		if uptime == "" {
+			uptime = status
+		}
+		ports := formatDockerPorts(dc.Ports)
+		stackKey := inferStackKey(dc.Image, cname)
+
+		var prev Container
+		hasPrev := false
+		if p, ok := existingByID[cid]; ok {
+			prev, hasPrev = p, true
+		} else if p, ok := existingByName[cname]; ok {
+			prev, hasPrev = p, true
+		}
+
+		if hasPrev && !e.discoveredContainerIDs[prev.ID] {
+			matchedNonDiscovered[prev.ID] = true
+			projName = prev.Project
+		}
+
+		liveLogs := logsByID[cid]
+		mapped := Container{
+			ID:           cid,
+			Name:         cname,
+			Project:      projName,
+			StackKey:     stackKey,
+			Image:        dc.Image,
+			PreviousTags: []string{},
+			Status:       status,
+			Ports:        ports,
+			Uptime:       uptime,
+			RAMLimitMb:   512,
+			Logs:         slices.Clone(liveLogs),
+		}
+		if hasPrev {
+			mapped.PreviousTags = slices.Clone(prev.PreviousTags)
+			if len(mapped.Logs) == 0 {
+				mapped.Logs = slices.Clone(prev.Logs)
+			}
+			mapped.CPUPct = prev.CPUPct
+			mapped.RAMMb = prev.RAMMb
+			if prev.RAMLimitMb > 0 {
+				mapped.RAMLimitMb = prev.RAMLimitMb
+			}
+		}
+		if len(mapped.PreviousTags) == 0 && dc.Image != "" {
+			mapped.PreviousTags = []string{dc.Image}
+		}
+
+		discoveredContainers = append(discoveredContainers, mapped)
+		newDiscoveredIDs[mapped.ID] = true
+
+		grp, exists := groupsByName[projName]
+		if !exists {
+			grp = &projectGroup{name: projName, isCompose: composeProj != ""}
+			groupsByName[projName] = grp
+			groupOrder = append(groupOrder, projName)
+		}
+		grp.containers = append(grp.containers, mapped)
+		if ports != "" && ports != "internal" {
+			grp.primaryPorts = append(grp.primaryPorts, ports)
+		}
+		if len(liveLogs) > 0 && len(grp.logs) == 0 {
+			grp.logs = slices.Clone(liveLogs)
+		}
+		if r := strings.TrimSpace(dc.Labels["deploymenthub.repo"]); r != "" && grp.repo == "" {
+			grp.repo = r
+		}
+		if b := strings.TrimSpace(dc.Labels["deploymenthub.branch"]); b != "" && grp.branch == "" {
+			grp.branch = b
+		}
+		if c := strings.TrimSpace(dc.Labels["deploymenthub.commit"]); c != "" && grp.commit == "" {
+			grp.commit = c
+		}
+		if d := strings.TrimSpace(dc.Labels["deploymenthub.domain"]); d != "" && grp.domain == "" {
+			grp.domain = d
+		}
+		if domain, pathRule, ssl := extractTraefikRouteFromLabels(dc.Labels); domain != "" {
+			if grp.domain == "" {
+				grp.domain = domain
+			}
+			if !seenRouteDomains[domain+pathRule] {
+				seenRouteDomains[domain+pathRule] = true
+				targetPort := "80"
+				if len(dc.Ports) > 0 && dc.Ports[0].PrivatePort > 0 {
+					targetPort = strconv.Itoa(int(dc.Ports[0].PrivatePort))
+				}
+				proto := "HTTP Only"
+				certExp := "Local / HTTP"
+				if ssl {
+					proto = "HTTP/2 + TLS 1.3"
+					certExp = "Auto-SSL (Let's Encrypt)"
+				}
+				discoveredRoutes = append(discoveredRoutes, ProxyRoute{
+					ID:       "rt-" + cid,
+					Domain:   domain,
+					Target:   cname + ":" + targetPort,
+					PathRule: pathRule,
+					SSL:      ssl,
+					CertExp:  certExp,
+					Protocol: proto,
+				})
+			}
+		}
+	}
+
+	mergedContainers := make([]Container, 0, len(e.containers)+len(discoveredContainers))
+	mergedContainers = append(mergedContainers, discoveredContainers...)
+	for _, c := range e.containers {
+		if !e.discoveredContainerIDs[c.ID] && !matchedNonDiscovered[c.ID] {
+			mergedContainers = append(mergedContainers, cloneContainer(c))
+		}
+	}
+	e.containers = mergedContainers
+	e.discoveredContainerIDs = newDiscoveredIDs
+
+	if len(discoveredRoutes) > 0 {
+		existingRoutesByDomain := make(map[string]ProxyRoute, len(e.proxyRoutes))
+		for _, r := range e.proxyRoutes {
+			existingRoutesByDomain[r.Domain+r.PathRule] = r
+		}
+		mergedRoutes := make([]ProxyRoute, 0, len(discoveredRoutes)+len(e.proxyRoutes))
+		for _, dr := range discoveredRoutes {
+			if prev, ok := existingRoutesByDomain[dr.Domain+dr.PathRule]; ok {
+				dr.SSL = prev.SSL
+				dr.Protocol = prev.Protocol
+				dr.CertExp = prev.CertExp
+			}
+			mergedRoutes = append(mergedRoutes, dr)
+		}
+		for _, r := range e.proxyRoutes {
+			if !seenRouteDomains[r.Domain+r.PathRule] && !strings.HasPrefix(r.ID, "rt-") {
+				mergedRoutes = append(mergedRoutes, r)
+			} else if !seenRouteDomains[r.Domain+r.PathRule] && len(r.ID) < 10 {
+				mergedRoutes = append(mergedRoutes, r)
+			}
+		}
+		e.proxyRoutes = mergedRoutes
+	}
+
+	// Merge grouped discovered projects with any DeploymentHub-deployed projects.
+	existingProjects := make(map[string]Project, len(e.projects))
+	for _, p := range e.projects {
+		existingProjects[p.Name] = p
+	}
+
+	newDiscoveredProjIDs := make(map[string]bool, len(groupOrder))
+	mergedProjects := make([]Project, 0, len(groupOrder)+len(e.projects))
+	seenProjectNames := make(map[string]bool, len(groupOrder))
+
+	for _, name := range groupOrder {
+		grp := groupsByName[name]
+		seenProjectNames[name] = true
+
+		anyRunning := false
+		for _, c := range grp.containers {
+			if c.Status == "Running" {
+				anyRunning = true
+				break
+			}
+		}
+		projStatus := "Stopped"
+		if anyRunning {
+			projStatus = "Running"
+		}
+
+		stackKey := grp.containers[0].StackKey
+		if grp.isCompose || len(grp.containers) > 1 {
+			stackKey = "compose"
+		}
+		meta := presetMetaFor(stackKey)
+		stackDesc := meta.stack
+		if len(grp.containers) > 1 {
+			stackDesc = fmt.Sprintf("Docker Compose (%d containers)", len(grp.containers))
+		}
+		portSummary := "internal"
+		if len(grp.primaryPorts) > 0 {
+			portSummary = grp.primaryPorts[0]
+		}
+
+		if existing, ok := existingProjects[name]; ok && !e.discoveredProjectIDs[existing.ID] {
+			existing.Status = projStatus
+			if grp.domain != "" {
+				existing.Domain = grp.domain
+			}
+			if portSummary != "" && portSummary != "internal" {
+				existing.Port = portSummary
+			}
+			if len(grp.logs) > 0 && len(existing.Logs) == 0 {
+				existing.Logs = slices.Clone(grp.logs)
+			}
+			mergedProjects = append(mergedProjects, cloneProject(existing))
+			continue
+		}
+
+		repoVal := grp.containers[0].Image
+		if grp.repo != "" {
+			repoVal = grp.repo
+		}
+		branchVal := "live"
+		if grp.branch != "" {
+			branchVal = grp.branch
+		}
+		commitVal := grp.containers[0].ID
+		if grp.commit != "" {
+			commitVal = grp.commit
+		}
+
+		proj := Project{
+			ID:         name,
+			Name:       name,
+			Stack:      stackDesc,
+			StackKey:   stackKey,
+			Category:   "Docker Engine",
+			Domain:     grp.domain,
+			Repo:       repoVal,
+			Branch:     branchVal,
+			Commit:     commitVal,
+			CommitMsg:  fmt.Sprintf("Discovered %d live container(s)", len(grp.containers)),
+			Status:     projStatus,
+			RAMLimitMb: 512 * len(grp.containers),
+			Port:       portSummary,
+			UpdatedAt:  grp.containers[0].Uptime,
+			Logs:       slices.Clone(grp.logs),
+		}
+		if existing, ok := existingProjects[name]; ok && len(proj.Logs) == 0 {
+			proj.Logs = slices.Clone(existing.Logs)
+		}
+		mergedProjects = append(mergedProjects, proj)
+		newDiscoveredProjIDs[proj.ID] = true
+	}
+
+	for _, p := range e.projects {
+		if seenProjectNames[p.Name] {
+			continue
+		}
+		if !e.discoveredProjectIDs[p.ID] {
+			mergedProjects = append(mergedProjects, cloneProject(p))
+		}
+	}
+
+	e.projects = mergedProjects
+	e.discoveredProjectIDs = newDiscoveredProjIDs
+}
+
+func (e *Engine) applyDiscoveredImagesLocked(apiImages []dockerAPIImage) {
+	discoveredImages := make([]DockerImage, 0, len(apiImages))
+	newDiscoveredImgIDs := make(map[string]bool, len(apiImages))
+	seenTags := make(map[string]bool, len(apiImages))
+
+	for _, di := range apiImages {
+		rawID := strings.TrimPrefix(di.Id, "sha256:")
+		imgID := shortDockerID(rawID)
+		repoTag, dangling := resolveDockerImageTag(di)
+		sizeMb := int(math.Round(float64(di.Size) / (1024.0 * 1024.0)))
+		if di.Size > 0 && sizeMb == 0 {
+			sizeMb = 1
+		}
+		inUse := di.Containers > 0 || imageUsedByContainers(repoTag, rawID, e.containers)
+
+		img := DockerImage{
+			ID:       imgID,
+			RepoTag:  repoTag,
+			SizeMb:   sizeMb,
+			InUse:    inUse,
+			Dangling: dangling,
+			Created:  formatUnixSeconds(di.Created),
+			History:  []string{repoTag},
+		}
+		discoveredImages = append(discoveredImages, img)
+		newDiscoveredImgIDs[img.ID] = true
+		if repoTag != "<none>:<none>" {
+			seenTags[repoTag] = true
+		}
+	}
+
+	merged := make([]DockerImage, 0, len(discoveredImages)+len(e.images))
+	merged = append(merged, discoveredImages...)
+	for _, img := range e.images {
+		if !e.discoveredImageIDs[img.ID] && !seenTags[img.RepoTag] {
+			merged = append(merged, cloneImage(img))
+		}
+	}
+	e.images = merged
+	e.discoveredImageIDs = newDiscoveredImgIDs
+}
+
+func fetchDockerJSON[T any](client *http.Client, endpoint string) (T, bool) {
+	var zero T
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return zero, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return zero, false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return zero, false
+	}
+
+	var out T
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+		return zero, false
+	}
+	return out, true
+}
+
+func sendDockerContainerAction(endpoint, containerID, action string) {
+	client, baseURL, ok := newDockerHTTPClient(endpoint, 2*time.Second)
+	if !ok {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/containers/"+url.PathEscape(containerID)+"/"+action, nil)
+	if err != nil {
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
+}
+
+func newDockerHTTPClient(dockerHost string, timeout time.Duration) (*http.Client, string, bool) {
+	trimmed := strings.TrimSpace(dockerHost)
+	if trimmed == "" {
+		return nil, "", false
+	}
+	if strings.HasPrefix(trimmed, "unix://") || strings.HasPrefix(trimmed, "/") {
+		sockPath := strings.TrimPrefix(trimmed, "unix://")
+		client := &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "unix", sockPath)
+				},
+			},
+		}
+		return client, "http://localhost", true
+	}
+
+	baseURL := trimmed
+	if strings.HasPrefix(baseURL, "tcp://") {
+		baseURL = "http://" + strings.TrimPrefix(baseURL, "tcp://")
+	}
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	return &http.Client{Timeout: timeout}, strings.TrimRight(baseURL, "/"), true
+}
+
+func shortDockerID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if len(trimmed) >= 64 {
+		return trimmed[:12]
+	}
+	return trimmed
+}
+
+func formatDockerPorts(ports []dockerAPIContainerPort) string {
+	if len(ports) == 0 {
+		return "internal"
+	}
+	seen := make(map[string]bool, len(ports))
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		proto := p.Type
+		if proto == "" {
+			proto = "tcp"
+		}
+		var formatted string
+		if p.PublicPort > 0 {
+			ip := p.IP
+			if ip == "" {
+				ip = "0.0.0.0"
+			}
+			formatted = ip + ":" + strconv.Itoa(int(p.PublicPort)) + "->" + strconv.Itoa(int(p.PrivatePort)) + "/" + proto
+		} else if p.PrivatePort > 0 {
+			formatted = strconv.Itoa(int(p.PrivatePort)) + "/" + proto
+		}
+		if formatted != "" && !seen[formatted] {
+			seen[formatted] = true
+			parts = append(parts, formatted)
+		}
+	}
+	if len(parts) == 0 {
+		return "internal"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func inferStackKey(image, name string) string {
+	combined := strings.ToLower(image + " " + name)
+	switch {
+	case strings.Contains(combined, "next"):
+		return "nextjs"
+	case strings.Contains(combined, "rust") || strings.Contains(combined, "actix") || strings.Contains(combined, "cargo"):
+		return "rust"
+	case strings.Contains(combined, "golang") || strings.Contains(combined, "/go") || strings.Contains(combined, "go-") || strings.Contains(combined, "-go"):
+		return "go"
+	case strings.Contains(combined, "nginx") || strings.Contains(combined, "react") || strings.Contains(combined, "vite") || strings.Contains(combined, "angular") || strings.Contains(combined, "node"):
+		return "spa"
+	default:
+		return "compose"
+	}
+}
+
+func resolveDockerImageTag(di dockerAPIImage) (string, bool) {
+	if len(di.RepoTags) > 0 {
+		tag := strings.TrimSpace(di.RepoTags[0])
+		if tag != "" && tag != "<none>:<none>" {
+			return tag, false
+		}
+		return "<none>:<none>", true
+	}
+	if len(di.RepoDigests) > 0 {
+		if repo, _, ok := strings.Cut(di.RepoDigests[0], "@"); ok && repo != "" {
+			return repo + ":<none>", true
+		}
+	}
+	return "<none>:<none>", true
+}
+
+func imageUsedByContainers(repoTag, rawID string, containers []Container) bool {
+	for _, c := range containers {
+		if c.Image == repoTag || (rawID != "" && strings.Contains(c.Image, shortDockerID(rawID))) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatUnixSeconds(ts int64) string {
+	if ts <= 0 {
+		return "unknown"
+	}
+	return time.Unix(ts, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+func fetchDockerContainerLogs(client *http.Client, baseURL, containerID string, tail int) []string {
+	if client == nil || strings.TrimSpace(containerID) == "" {
+		return nil
+	}
+	if tail <= 0 {
+		tail = 25
+	}
+	endpoint := fmt.Sprintf("%s/containers/%s/logs?stdout=1&stderr=1&tail=%d", baseURL, url.PathEscape(containerID), tail)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	stdout, stderr, muxErr := ParseDockerMultiplexedStream(raw)
+	if muxErr == nil {
+		combined := make([]string, 0, len(stdout)+len(stderr))
+		combined = append(combined, stdout...)
+		combined = append(combined, stderr...)
+		if len(combined) > tail {
+			combined = combined[len(combined)-tail:]
+		}
+		return combined
+	}
+	lines := splitDockerPayloadLines(string(raw))
+	if len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+	return lines
+}
+
+func extractTraefikRouteFromLabels(labels map[string]string) (domain, pathRule string, ssl bool) {
+	if len(labels) == 0 {
+		return "", "", false
+	}
+	pathRule = "/*"
+	for k, v := range labels {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if strings.HasPrefix(lk, "traefik.http.routers.") && strings.HasSuffix(lk, ".rule") {
+			if idx := strings.Index(v, "Host(`"); idx >= 0 {
+				rest := v[idx+6:]
+				if end := strings.IndexByte(rest, '`'); end > 0 {
+					domain = strings.TrimSpace(rest[:end])
+				}
+			}
+			if idx := strings.Index(v, "PathPrefix(`"); idx >= 0 {
+				rest := v[idx+12:]
+				if end := strings.IndexByte(rest, '`'); end > 0 {
+					pathRule = strings.TrimSpace(rest[:end]) + "/*"
+				}
+			}
+		}
+		if strings.HasPrefix(lk, "traefik.http.routers.") && (strings.HasSuffix(lk, ".tls") || strings.HasSuffix(lk, ".tls.certresolver")) {
+			if v != "" && !strings.EqualFold(v, "false") {
+				ssl = true
+			}
+		}
+	}
+	return domain, pathRule, ssl
+}
+
+func isSyntheticTestRepo(repoURL string) bool {
+	s := strings.TrimSpace(repoURL)
+	s = strings.TrimPrefix(s, "https://github.com/")
+	s = strings.TrimPrefix(s, "http://github.com/")
+	s = strings.TrimPrefix(s, "github.com/")
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 {
+		return true
+	}
+	owner := strings.ToLower(strings.TrimSpace(parts[0]))
+	switch owner {
+	case "", "org", "my-org", "example-org", "local", "test", "example":
+		return true
+	default:
+		return false
+	}
+}
+
+func probeGitHubToken(token string) (login string, scopes []string, ok bool) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
+	if err != nil {
+		return "", nil, false
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "DeploymentHub-Go-ControlPlane/2.0")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, false
+	}
+	var u struct {
+		Login string `json:"login"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&u)
+	rawScopes := resp.Header.Get("X-OAuth-Scopes")
+	for _, sc := range strings.Split(rawScopes, ",") {
+		if trimmed := strings.TrimSpace(sc); trimmed != "" {
+			scopes = append(scopes, trimmed)
+		}
+	}
+	return strings.TrimSpace(u.Login), scopes, true
+}
+
+func fetchLatestGitHubCommit(repoURL, branch, token string) (shortSHA, message string) {
+	fallbackSHA := "sha-" + shortHex(3)
+	fallbackMsg := "deployed via DeploymentHub pipeline"
+	if isSyntheticTestRepo(repoURL) {
+		return fallbackSHA, fallbackMsg
+	}
+	s := strings.TrimSpace(repoURL)
+	s = strings.TrimPrefix(s, "https://github.com/")
+	s = strings.TrimPrefix(s, "http://github.com/")
+	s = strings.TrimPrefix(s, "github.com/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.Trim(s, "/")
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 {
+		return fallbackSHA, fallbackMsg
+	}
+	owner, repo := parts[0], parts[1]
+	ref := strings.TrimSpace(branch)
+	if ref == "" {
+		ref = "main"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fallbackSHA, fallbackMsg
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "DeploymentHub-Go-ControlPlane/2.0")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fallbackSHA, fallbackMsg
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fallbackSHA, fallbackMsg
+	}
+	var payload struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+		} `json:"commit"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(&payload); err != nil || payload.SHA == "" {
+		return fallbackSHA, fallbackMsg
+	}
+	sha := payload.SHA
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	msg := strings.TrimSpace(strings.Split(payload.Commit.Message, "\n")[0])
+	if msg == "" {
+		msg = fallbackMsg
+	}
+	return sha, msg
 }

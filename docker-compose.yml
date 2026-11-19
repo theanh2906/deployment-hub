@@ -33,29 +33,33 @@ services:
 
   # Traefik v3 Reverse Proxy with Auto-SSL (Let's Encrypt)
   traefik:
-    image: traefik:v3.0
+    image: traefik:v3.6
     container_name: deploymenthub-traefik
     restart: unless-stopped
     depends_on:
       - docker-socket-proxy
+    environment:
+      CF_DNS_API_TOKEN: "${CF_DNS_API_TOKEN:-}"
     command:
       - "--providers.docker=true"
       - "--providers.docker.endpoint=tcp://docker-socket-proxy:2375"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=deploymenthub_proxy"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@example.com}"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-theanh2906@gmail.com}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - letsencrypt_certs:/letsencrypt
+      - traefik_dynamic:/etc/traefik/dynamic
     networks:
       - hub_internal
       - deploymenthub_proxy
@@ -70,6 +74,8 @@ services:
     depends_on:
       - docker-socket-proxy
       - traefik
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${PORT:-4180}:4180"
     environment:
@@ -77,8 +83,16 @@ services:
       DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       HUB_MASTER_KEY: "${HUB_MASTER_KEY:-change-me-32-byte-production-master-key}"
       GITHUB_WEBHOOK_SECRET: "${GITHUB_WEBHOOK_SECRET:-change-me-github-webhook-secret}"
+      MAH_API_URL: "${MAH_API_URL:-http://127.0.0.1:4180}"
+      MAH_API_TOKEN: "${MAH_API_TOKEN:-}"
+      MAH_SERVER_HOST: "${MAH_SERVER_HOST:-}"
+      MAH_DATA_FILE: "/data/mah_state.json"
+      CLOUDFLARE_DATA_FILE: "/data/cloudflare.json"
+      TRAEFIK_DYNAMIC_DIR: "/data/traefik-dynamic"
+      VPS_PUBLIC_IP: "${VPS_PUBLIC_IP:-}"
     volumes:
       - hub_data:/data
+      - traefik_dynamic:/data/traefik-dynamic
     networks:
       - hub_internal
       - deploymenthub_proxy
@@ -86,8 +100,7 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=deploymenthub_proxy"
       - "traefik.http.routers.deploymenthub.rule=Host(`${HUB_DOMAIN:-hub.localhost}`)"
-      - "traefik.http.routers.deploymenthub.entrypoints=websecure"
-      - "traefik.http.routers.deploymenthub.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.deploymenthub.entrypoints=web"
       - "traefik.http.services.deploymenthub.loadbalancer.server.port=4180"
 
 networks:
@@ -100,3 +113,4 @@ networks:
 volumes:
   hub_data:
   letsencrypt_certs:
+  traefik_dynamic:

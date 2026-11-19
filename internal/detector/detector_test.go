@@ -13,11 +13,11 @@ func TestDetectRepoURLInferenceAndModes(t *testing.T) {
 		repo string
 		want string
 	}{
-		{"anh-tang/nextjs-ai-dashboard", "nextjs"},
-		{"anh-tang/angular-saas-portal", "spa"},
-		{"https://github.com/my-org/private-go-api.git", "go"},
-		{"anh-tang/rust-order-matcher", "rust"},
-		{"anh-tang/ecommerce-monorepo", "compose"},
+		{"example-org/next-dashboard", "nextjs"},
+		{"example-org/angular-portal", "spa"},
+		{"https://github.com/example-org/go-api-service.git", "go"},
+		{"example-org/rust-matcher", "rust"},
+		{"example-org/ecommerce-monorepo", "compose"},
 	}
 
 	for _, tc := range cases {
@@ -138,7 +138,7 @@ func TestGenerateDockerfileAllStacks(t *testing.T) {
 			PresetKey:  st.preset,
 			Mode:       "hybrid",
 			AppName:    "crm",
-			Domain:     "crm.anna.dev",
+			Domain:     "crm.localhost",
 			NativeDeps: []string{"vips-dev", "pkg-config", "musl-dev"},
 		})
 		for _, needle := range st.contains {

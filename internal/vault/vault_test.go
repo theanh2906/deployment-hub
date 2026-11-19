@@ -101,7 +101,7 @@ func TestVaultRandomKeyAndTamperRejection(t *testing.T) {
 
 func TestVerifyGitHubSignature(t *testing.T) {
 	secret := "whsec_deploymenthub_test_secret"
-	payload := []byte(`{"ref":"refs/heads/main","repository":{"full_name":"anh-tang/nextjs-commerce-store"}}`)
+	payload := []byte(`{"ref":"refs/heads/main","repository":{"full_name":"example-org/sample-app"}}`)
 
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)

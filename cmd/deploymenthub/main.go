@@ -15,12 +15,22 @@ import (
 	"time"
 
 	"deploymenthub/internal/docker"
+	"deploymenthub/internal/mah"
 	"deploymenthub/internal/server"
 	"deploymenthub/internal/vault"
 	"deploymenthub/web"
 )
 
 func main() {
+	if (len(os.Args) > 1 && os.Args[1] == "mcp") || strings.EqualFold(strings.TrimSpace(os.Getenv("MCP_TRANSPORT")), "stdio") {
+		mcpAPIURL := firstNonEmptyEnv("MAH_MCP_API_URL", "MAH_API_URL", "http://127.0.0.1:4180")
+		mcpToken := firstNonEmptyEnv("MAH_API_KEY", "MAH_API_TOKEN", "")
+		if err := mah.RunMCPStdio(mcpAPIURL, mcpToken, os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("[fatal] MCP stdio server error: %v", err)
+		}
+		return
+	}
+
 	port := envOrDefault("PORT", "4180")
 	dockerHost := strings.TrimSpace(os.Getenv("DOCKER_HOST"))
 	masterKey := os.Getenv("HUB_MASTER_KEY")
@@ -77,4 +87,16 @@ func envOrDefault(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func firstNonEmptyEnv(keysAndFallback ...string) string {
+	if len(keysAndFallback) == 0 {
+		return ""
+	}
+	for _, key := range keysAndFallback[:len(keysAndFallback)-1] {
+		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+			return val
+		}
+	}
+	return keysAndFallback[len(keysAndFallback)-1]
 }

@@ -5,5 +5,5 @@ import "embed"
 
 // StaticFS holds the embedded frontend HTML bundle served at "/".
 //
-//go:embed index.html
+//go:embed index.html logo.svg favicon.svg assets/*
 var StaticFS embed.FS

@@ -15,13 +15,13 @@ FROM alpine:3.20 AS runner
 RUN apk add --no-cache ca-certificates git tzdata \
     && addgroup -S -g 10001 hub \
     && adduser -S -u 10001 -G hub hub \
-    && mkdir -p /data \
+    && mkdir -p /data/traefik-dynamic \
     && chown -R hub:hub /data
 
 WORKDIR /app
 COPY --from=builder /out/deploymenthub /usr/local/bin/deploymenthub
-# Keep web/index.html alongside binary as optional disk override reference
-COPY --from=builder --chown=hub:hub /src/web/index.html /app/web/index.html
+# Keep web assets alongside binary as optional disk override reference
+COPY --from=builder --chown=hub:hub /src/web /app/web
 
 USER hub
 EXPOSE 4180

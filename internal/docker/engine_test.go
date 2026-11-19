@@ -23,6 +23,39 @@ func newTestEngine(t *testing.T, dockerHost string) *Engine {
 	return NewEngine(dockerHost, v)
 }
 
+func deployAndWait(t *testing.T, eng *Engine, req DeployRequest) DeploymentRecord {
+	t.Helper()
+	rec, err := eng.StartDeployment(req)
+	if err != nil {
+		t.Fatalf("StartDeployment failed: %v", err)
+	}
+	history, ch, unsub, ok := eng.SubscribeDeployment(rec.ID)
+	if !ok {
+		t.Fatalf("SubscribeDeployment(%s) returned ok=false", rec.ID)
+	}
+	defer unsub()
+
+	events := append([]DeployEvent{}, history...)
+	timeout := time.After(5 * time.Second)
+	for len(events) == 0 || !events[len(events)-1].Done {
+		select {
+		case ev, open := <-ch:
+			if !open {
+				goto done
+			}
+			events = append(events, ev)
+		case <-timeout:
+			t.Fatalf("timed out waiting for deployment %s", rec.ID)
+		}
+	}
+done:
+	finalRec, exists := eng.GetDeployment(rec.ID)
+	if !exists || finalRec.Status != "success" {
+		t.Fatalf("deployment %s did not succeed: exists=%v rec=%+v", rec.ID, exists, finalRec)
+	}
+	return finalRec
+}
+
 func TestNewEngineSimulatorSeedAndProbeFallback(t *testing.T) {
 	eng := newTestEngine(t, "http://127.0.0.1:1") // unreachable should cleanly fallback
 	ov := eng.GetOverview()
@@ -30,23 +63,18 @@ func TestNewEngineSimulatorSeedAndProbeFallback(t *testing.T) {
 	if ov.VPS.RuntimeMode != "simulator" {
 		t.Fatalf("expected simulator fallback mode, got %q", ov.VPS.RuntimeMode)
 	}
-	if len(ov.Projects) != 5 {
-		t.Fatalf("expected 5 seeded projects, got %d", len(ov.Projects))
+	if ov.VPS.Host == "" {
+		t.Fatal("expected non-empty host from readHostTelemetry()")
 	}
-	if len(ov.Containers) != 7 {
-		t.Fatalf("expected 7 seeded containers, got %d", len(ov.Containers))
-	}
-	if len(ov.Images) != 6 {
-		t.Fatalf("expected 6 seeded images, got %d", len(ov.Images))
-	}
-	if len(ov.ProxyRoutes) != 5 {
-		t.Fatalf("expected 5 seeded proxy routes, got %d", len(ov.ProxyRoutes))
+	if len(ov.Projects) != 0 || len(ov.Containers) != 0 || len(ov.Images) != 0 || len(ov.ProxyRoutes) != 0 {
+		t.Fatalf("expected clean empty state with zero mock data, got p=%d c=%d i=%d r=%d",
+			len(ov.Projects), len(ov.Containers), len(ov.Images), len(ov.ProxyRoutes))
 	}
 	if ov.WebhookURL == "" {
-		t.Fatal("expected seeded webhook URL")
+		t.Fatal("expected webhook URL")
 	}
 
-	// Probe live mock Docker Engine HTTP endpoint.
+	// Probe live mock Docker Engine HTTP endpoint (handles /_ping and /version only).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/_ping":
@@ -72,9 +100,38 @@ func TestNewEngineSimulatorSeedAndProbeFallback(t *testing.T) {
 func TestProjectAndContainerLifecycleAndPruneAndSSL(t *testing.T) {
 	eng := newTestEngine(t, "")
 
-	// Restart Stopped project -> Running and syncs container + VPS RAM.
+	req := DeployRequest{
+		AppName:     "sample-web-app",
+		RepoURL:     "https://github.com/example-org/sample-web-app.git",
+		Branch:      "main",
+		Domain:      "web.localhost",
+		DetectMode:  "hybrid",
+		PresetKey:   "nextjs",
+		PortMapping: "3000 -> 443",
+	}
+	deployAndWait(t, eng, req)
+	// Second deployment populates PreviousTags for rollback testing.
+	deployAndWait(t, eng, req)
+
 	initialOv := eng.GetOverview()
-	restarted, err := eng.RestartProject("react-admin-portal")
+	if len(initialOv.Projects) != 1 || len(initialOv.Containers) != 1 || len(initialOv.ProxyRoutes) != 1 {
+		t.Fatalf("expected 1 deployed project/container/route, got p=%d c=%d r=%d",
+			len(initialOv.Projects), len(initialOv.Containers), len(initialOv.ProxyRoutes))
+	}
+	cntID := initialOv.Containers[0].ID
+	prevTag := initialOv.Containers[0].PreviousTags[0]
+
+	// Container stop -> parent project reflects Stopped -> RestartProject brings it back Running.
+	stopped, err := eng.ContainerAction(cntID, "stop", "")
+	if err != nil || stopped.Status != "Stopped" || stopped.RAMMb != 0 {
+		t.Fatalf("stop action failed: %+v, err=%v", stopped, err)
+	}
+	ovAfterStop := eng.GetOverview()
+	if ovAfterStop.Projects[0].Status != "Stopped" {
+		t.Fatalf("expected parent project to reflect Stopped when its only container stops")
+	}
+
+	restarted, err := eng.RestartProject("sample-web-app")
 	if err != nil {
 		t.Fatalf("RestartProject failed: %v", err)
 	}
@@ -84,7 +141,7 @@ func TestProjectAndContainerLifecycleAndPruneAndSSL(t *testing.T) {
 
 	// Redeploy project -> new commit SHA & logs.
 	prevCommit := initialOv.Projects[0].Commit
-	redeployed, err := eng.RedeployProject("nextjs-commerce-store")
+	redeployed, err := eng.RedeployProject("sample-web-app")
 	if err != nil {
 		t.Fatalf("RedeployProject failed: %v", err)
 	}
@@ -92,48 +149,80 @@ func TestProjectAndContainerLifecycleAndPruneAndSSL(t *testing.T) {
 		t.Fatalf("expected new commit and Running status, got %+v", redeployed)
 	}
 
-	// Container stop -> start -> rollback.
-	stopped, err := eng.ContainerAction("cnt-next", "stop", "")
-	if err != nil || stopped.Status != "Stopped" || stopped.RAMMb != 0 {
-		t.Fatalf("stop action failed: %+v, err=%v", stopped, err)
-	}
-	ovAfterStop := eng.GetOverview()
-	if ovAfterStop.Projects[0].Status != "Stopped" {
-		t.Fatalf("expected parent project to reflect Stopped when its only container stops")
-	}
-
-	started, err := eng.ContainerAction("cnt-next", "start", "")
+	// Container start -> rollback -> invalid action.
+	started, err := eng.ContainerAction(cntID, "start", "")
 	if err != nil || started.Status != "Running" || started.RAMMb == 0 {
 		t.Fatalf("start action failed: %+v, err=%v", started, err)
 	}
 
-	rolled, err := eng.ContainerAction("cnt-next", "rollback", "nextjs-commerce:sha-7c10b4")
+	rolled, err := eng.ContainerAction(cntID, "rollback", prevTag)
 	if err != nil {
 		t.Fatalf("rollback action failed: %v", err)
 	}
-	if rolled.Image != "nextjs-commerce:sha-7c10b4" {
-		t.Fatalf("expected rolled back image tag, got %q", rolled.Image)
+	if rolled.Image != prevTag {
+		t.Fatalf("expected rolled back image tag %q, got %q", prevTag, rolled.Image)
 	}
-	if _, err := eng.ContainerAction("cnt-next", "unknown", ""); err == nil {
+	if _, err := eng.ContainerAction(cntID, "unknown", ""); err == nil {
 		t.Fatal("expected error for unsupported container action")
 	}
 
-	// Prune dangling images (2 dangling images totaling 1180 MB).
-	pruneRes := eng.PruneDanglingImages()
-	if pruneRes.RemovedCount != 2 || pruneRes.ReclaimedMb != 1180 {
-		t.Fatalf("unexpected prune result: %+v", pruneRes)
-	}
-	if len(pruneRes.Images) != 4 {
-		t.Fatalf("expected 4 remaining images after prune, got %d", len(pruneRes.Images))
-	}
-
 	// Toggle proxy SSL.
-	rt, err := eng.ToggleProxySSL("rt-5")
+	rt, err := eng.ToggleProxySSL(initialOv.ProxyRoutes[0].ID)
 	if err != nil {
 		t.Fatalf("ToggleProxySSL failed: %v", err)
 	}
-	if !rt.SSL || rt.Protocol != "HTTP/2 + TLS 1.3" {
-		t.Fatalf("expected SSL enabled on rt-5, got %+v", rt)
+	if rt.SSL || rt.Protocol != "HTTP Only" {
+		t.Fatalf("expected SSL toggled off on route, got %+v", rt)
+	}
+
+	// ClearMockData resets all entities.
+	eng.ClearMockData()
+	cleared := eng.GetOverview()
+	if len(cleared.Projects) != 0 || len(cleared.Containers) != 0 || len(cleared.Images) != 0 || len(cleared.ProxyRoutes) != 0 {
+		t.Fatalf("expected all entities cleared after ClearMockData, got p=%d c=%d i=%d r=%d",
+			len(cleared.Projects), len(cleared.Containers), len(cleared.Images), len(cleared.ProxyRoutes))
+	}
+
+	// Test live Docker Engine discovery + PruneDanglingImages via mock Docker Engine API.
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_ping":
+			_, _ = w.Write([]byte("OK"))
+		case "/version":
+			_ = json.NewEncoder(w).Encode(map[string]string{"Version": "27.1.0"})
+		case "/info":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "docker-test-host", "NCPU": 4, "MemTotal": int64(8) * 1024 * 1024 * 1024, "ServerVersion": "27.1.0"})
+		case "/containers/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":     "cnt-live-1",
+					"Names":  []string{"/web-svc"},
+					"Image":  "web-svc:v1",
+					"State":  "running",
+					"Status": "Up 10 minutes",
+					"Ports":  []map[string]any{{"IP": "0.0.0.0", "PrivatePort": 8080, "PublicPort": 8080, "Type": "tcp"}},
+					"Labels": map[string]string{"com.docker.compose.project": "live-stack"},
+				},
+			})
+		case "/images/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": "sha256:1111", "RepoTags": []string{"web-svc:v1"}, "Size": 25 * 1024 * 1024, "Containers": 1, "Created": 1700000000},
+				{"Id": "sha256:2222", "RepoTags": []string{}, "Size": 64 * 1024 * 1024, "Containers": 0, "Created": 1700000000},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dockerSrv.Close()
+
+	liveEng := newTestEngine(t, dockerSrv.URL)
+	liveOv := liveEng.GetOverview()
+	if liveOv.VPS.Host != "docker-test-host" || len(liveOv.Containers) != 1 || len(liveOv.Images) != 2 {
+		t.Fatalf("unexpected live docker overview: host=%q c=%d i=%d", liveOv.VPS.Host, len(liveOv.Containers), len(liveOv.Images))
+	}
+	pruneRes := liveEng.PruneDanglingImages()
+	if pruneRes.RemovedCount != 1 || pruneRes.ReclaimedMb != 64 || len(pruneRes.Images) != 1 {
+		t.Fatalf("unexpected prune result: %+v", pruneRes)
 	}
 }
 
@@ -141,7 +230,7 @@ func TestVerifyPATNeverEchoesRawToken(t *testing.T) {
 	eng := newTestEngine(t, "")
 	rawPAT := "ghp_SuperSecretTokenValue987654"
 
-	res, err := eng.VerifyPAT(rawPAT, "https://github.com/my-org/private-go-api.git")
+	res, err := eng.VerifyPAT(rawPAT, "https://github.com/example-org/go-api-service.git")
 	if err != nil {
 		t.Fatalf("VerifyPAT failed: %v", err)
 	}
@@ -156,7 +245,7 @@ func TestVerifyPATNeverEchoesRawToken(t *testing.T) {
 		t.Fatalf("expected go detectResult, got %#v", res["detectResult"])
 	}
 
-	if _, err := eng.VerifyPAT("bad", "https://github.com/org/repo"); err == nil {
+	if _, err := eng.VerifyPAT("bad", "https://github.com/example-org/repo"); err == nil {
 		t.Fatal("expected invalid short PAT to fail")
 	}
 }
@@ -168,9 +257,9 @@ func TestStartDeploymentAsyncPipelineAndSubscribe(t *testing.T) {
 
 	rec, err := eng.StartDeployment(DeployRequest{
 		AppName:     "billing-go-svc",
-		RepoURL:     "https://github.com/anh-tang/go-billing-service.git",
+		RepoURL:     "https://github.com/example-org/go-billing-service.git",
 		Branch:      "main",
-		Domain:      "billing.anna.dev",
+		Domain:      "billing.localhost",
 		SCMMode:     "pat",
 		PAT:         secretPAT,
 		DetectMode:  "hybrid",
@@ -244,7 +333,7 @@ doneCollect:
 		}
 	}
 	for _, r := range ov.ProxyRoutes {
-		if r.Domain == "billing.anna.dev" && r.SSL {
+		if r.Domain == "billing.localhost" && r.SSL {
 			foundRoute = true
 		}
 	}
@@ -292,6 +381,13 @@ func TestParseDockerMultiplexedStream(t *testing.T) {
 
 func TestEngineConcurrentAccess(t *testing.T) {
 	eng := newTestEngine(t, "")
+	deployAndWait(t, eng, DeployRequest{
+		AppName:    "concurrent-app",
+		RepoURL:    "https://github.com/example-org/concurrent-app.git",
+		Domain:     "concurrent.localhost",
+		PresetKey:  "go",
+		DetectMode: "hybrid",
+	})
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
@@ -299,9 +395,9 @@ func TestEngineConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			_ = eng.GetOverview()
 			if idx%2 == 0 {
-				_, _ = eng.RestartProject("react-admin-portal")
+				_, _ = eng.RestartProject("concurrent-app")
 			} else {
-				_, _ = eng.ToggleProxySSL("rt-5")
+				_, _ = eng.ToggleProxySSL("concurrent.localhost")
 			}
 		}(i)
 	}
