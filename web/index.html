@@ -2782,6 +2782,36 @@ volumes:
       }
     }
 
+    function normalizeRepoRef(raw) {
+      return String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\/github\.com\//, '')
+        .replace(/^git@github\.com:/, '')
+        .replace(/^github\.com\//, '')
+        .replace(/\.git$/, '')
+        .replace(/^\/+|\/+$/g, '');
+    }
+
+    function findDeployedProjectForRepo(repoStr) {
+      const norm = normalizeRepoRef(repoStr);
+      if (!norm) return null;
+      const slug = norm.split('/').pop() || '';
+      const list = Array.isArray(state.projects) ? state.projects : [];
+      return list.find(p => {
+        if (!p) return false;
+        const pRepo = normalizeRepoRef(p.repo);
+        if (pRepo && pRepo === norm) return true;
+        const pName = String(p.name || '').trim().toLowerCase();
+        return Boolean(slug && pName && pName === slug);
+      }) || null;
+    }
+
+    function findFirstUndeployedRepo(repos) {
+      if (!Array.isArray(repos)) return null;
+      return repos.find(r => r && !findDeployedProjectForRepo(r.repo)) || null;
+    }
+
     async function fetchScmRepos(userOverride, opts = {}) {
       if (!canUseBackend()) return false;
       const user = String(userOverride !== undefined ? userOverride : (state.scm.user || DEFAULT_GITHUB_USER)).trim() || DEFAULT_GITHUB_USER;
@@ -2798,22 +2828,29 @@ volumes:
         if (Array.isArray(repos)) {
           state.scm.repos = repos;
           if (repos.length > 0) {
-            const found = repos.find(r => r.repo === state.wizard.oauthRepo) || repos[0];
-            state.wizard.oauthRepo = found.repo;
-            const slug = found.repo.split('/').pop();
-            state.wizard.appName = slug;
-            state.wizard.domain = defaultAppDomain(slug);
-            if (found.defaultBranch) {
-              state.wizard.oauthBranch = found.defaultBranch;
-              state.scm.branches = [found.defaultBranch];
-            }
-            if (found.preset && STACK_PRESETS[found.preset]) {
-              state.wizard.autoResolvedPreset = found.preset;
-              if (state.wizard.presetSelection === 'auto') {
-                applyWizardPreset(found.preset, false);
+            const found = repos.find(r => r.repo === state.wizard.oauthRepo && !findDeployedProjectForRepo(r.repo))
+              || findFirstUndeployedRepo(repos);
+            if (found) {
+              state.wizard.oauthRepo = found.repo;
+              const slug = found.repo.split('/').pop();
+              state.wizard.appName = slug;
+              state.wizard.domain = defaultAppDomain(slug);
+              if (found.defaultBranch) {
+                state.wizard.oauthBranch = found.defaultBranch;
+                state.scm.branches = [found.defaultBranch];
               }
+              if (found.preset && STACK_PRESETS[found.preset]) {
+                state.wizard.autoResolvedPreset = found.preset;
+                if (state.wizard.presetSelection === 'auto') {
+                  applyWizardPreset(found.preset, false);
+                }
+              }
+              fetchScmBranches(found.repo, { silent: true, skipRender: opts.skipRender });
+            } else {
+              state.wizard.oauthRepo = '';
+              state.wizard.appName = '';
+              state.wizard.domain = '';
             }
-            fetchScmBranches(found.repo, { silent: true, skipRender: opts.skipRender });
           }
         }
         state.scm.loadingRepos = false;
@@ -2832,6 +2869,21 @@ volumes:
     }
 
     function goWizardStep(n) {
+      const w = state.wizard;
+      if (w.step === 1 && n >= 2) {
+        const activeRepo = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+        const cleanName = String(w.appName || '').trim().toLowerCase();
+        const existing = findDeployedProjectForRepo(activeRepo)
+          || (cleanName ? (state.projects || []).find(p => String(p.name || '').trim().toLowerCase() === cleanName) : null);
+        if (w.scmMode === 'oauth' && !w.oauthRepo) {
+          showToast('Vui lòng chọn 1 repository chưa deploy.', 'warn');
+          return;
+        }
+        if (existing) {
+          showToast(`App "${existing.name}" đã được deploy — hãy dùng Redeploy ở tab Tổng quan.`, 'warn');
+          return;
+        }
+      }
       state.wizard.step = n;
       if (n === 1 && canUseBackend() && state.scm.repos.length === 0 && !state.scm.loadingRepos) {
         fetchScmRepos(state.scm.user, { silent: true });
@@ -2855,6 +2907,27 @@ volumes:
       if (canUseBackend() && state.scm.repos.length === 0 && !state.scm.loadingRepos && !state.scm.error) {
         fetchScmRepos(state.scm.user, { silent: true });
       }
+      if (w.scmMode === 'oauth' && state.scm.repos.length > 0 && (!w.oauthRepo || findDeployedProjectForRepo(w.oauthRepo))) {
+        const nextRepo = findFirstUndeployedRepo(state.scm.repos);
+        if (nextRepo) {
+          const slug = nextRepo.repo.split('/').pop();
+          w.oauthRepo = nextRepo.repo;
+          w.appName = slug;
+          w.domain = defaultAppDomain(slug);
+          if (nextRepo.defaultBranch) {
+            w.oauthBranch = nextRepo.defaultBranch;
+            state.scm.branches = [nextRepo.defaultBranch];
+          }
+          if (nextRepo.preset && STACK_PRESETS[nextRepo.preset]) {
+            w.autoResolvedPreset = nextRepo.preset;
+            if (w.presetSelection === 'auto') applyWizardPreset(nextRepo.preset, false);
+          }
+        } else {
+          w.oauthRepo = '';
+          w.appName = '';
+          w.domain = '';
+        }
+      }
       const q = (state.scm.repoSearch || '').trim().toLowerCase();
       const filteredRepos = state.scm.repos.filter(r => {
         if (!q) return true;
@@ -2862,6 +2935,12 @@ volumes:
           || String(r.desc || '').toLowerCase().includes(q)
           || String(r.language || '').toLowerCase().includes(q);
       });
+      const deployedCount = state.scm.repos.filter(r => Boolean(findDeployedProjectForRepo(r.repo))).length;
+      const activeRepo = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      const cleanAppName = String(w.appName || '').trim().toLowerCase();
+      const activeDeployed = findDeployedProjectForRepo(activeRepo)
+        || (cleanAppName ? (state.projects || []).find(p => String(p.name || '').trim().toLowerCase() === cleanAppName) : null);
+      const blockNext = (w.scmMode === 'oauth' && !w.oauthRepo) || Boolean(activeDeployed);
       const branchList = (Array.isArray(state.scm.branches) && state.scm.branches.length)
         ? state.scm.branches
         : [w.oauthBranch || 'main'];
@@ -2897,9 +2976,10 @@ volumes:
             <div class="space-y-3">
               <div class="space-y-2">
                 <div class="flex flex-wrap items-center justify-between gap-2">
-                  <label class="text-xs font-semibold text-[var(--foreground)]">
-                    Chọn Repository từ @${esc(state.scm.user || DEFAULT_GITHUB_USER)}
-                    <span class="ml-1.5 text-[11px] font-mono text-[var(--muted-foreground)]">(${filteredRepos.length}/${state.scm.repos.length} repos)</span>
+                  <label class="text-xs font-semibold text-[var(--foreground)] flex flex-wrap items-center gap-1.5">
+                    <span>Chọn Repository từ @${esc(state.scm.user || DEFAULT_GITHUB_USER)}</span>
+                    <span class="text-[11px] font-mono text-[var(--muted-foreground)]">(${filteredRepos.length}/${state.scm.repos.length} repos)</span>
+                    ${deployedCount > 0 ? `<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-medium">${deployedCount} đã deploy</span>` : ''}
                   </label>
                   <div class="flex flex-wrap items-center gap-1.5">
                     <input type="text" value="${esc(state.scm.user)}" onkeydown="if(event.key==='Enter'){event.preventDefault();fetchScmRepos(this.value);}" onchange="state.scm.user = this.value.trim() || '${DEFAULT_GITHUB_USER}'" placeholder="GitHub user/org..." class="w-32 px-2.5 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" title="Nhập GitHub username hoặc org" />
@@ -2928,9 +3008,38 @@ volumes:
                 ` : `
                   <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-2 max-h-[290px] overflow-y-auto thin-scroll pr-1">
                     ${filteredRepos.map(r => {
-                      const selected = w.oauthRepo === r.repo;
+                      const deployedProj = findDeployedProjectForRepo(r.repo);
+                      const isDeployed = Boolean(deployedProj);
+                      const selected = !isDeployed && w.oauthRepo === r.repo;
                       const presetKey = (r.preset && STACK_PRESETS[r.preset]) ? r.preset : inferPresetFromRepoStr(r.repo);
                       const presetLabel = STACK_PRESETS[presetKey]?.label || presetKey;
+                      if (isDeployed) {
+                        const isRunning = String(deployedProj.status || '') === 'Running';
+                        const statusPillCls = isRunning
+                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                          : 'bg-amber-500/15 text-amber-400 border-amber-500/30';
+                        const badgeText = isRunning
+                          ? '✓ Đã deploy'
+                          : `✓ Đã deploy (${deployedProj.status || 'Exists'})`;
+                        return `
+                          <div aria-disabled="true" title="App đã được deploy (${esc(deployedProj.domain || deployedProj.name)}). Vui lòng quản lý hoặc Redeploy ở tab Tổng quan." class="p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 text-left flex items-center gap-2.5 opacity-75 cursor-not-allowed select-none">
+                            ${stackIconHtml(presetKey, 'sm')}
+                            <div class="min-w-0 flex-1">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="text-xs font-mono font-semibold text-[var(--foreground)] truncate">${esc(r.repo)}</span>
+                                <div class="flex items-center gap-1 shrink-0">
+                                  <span class="text-[11px] px-2 py-0.5 rounded-full border font-semibold ${statusPillCls}">${esc(badgeText)}</span>
+                                  <span class="text-xs px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)]">${esc(presetLabel)}</span>
+                                </div>
+                              </div>
+                              <div class="flex items-center justify-between gap-2 mt-0.5">
+                                <span class="text-xs text-emerald-400/90 truncate">Đã deploy • ${esc(deployedProj.domain || deployedProj.name)} • Redeploy tại tab Tổng quan</span>
+                                ${r.updatedAt ? `<span class="text-[10px] font-mono text-[var(--muted-foreground)] shrink-0">${esc(r.updatedAt)}</span>` : ''}
+                              </div>
+                            </div>
+                          </div>
+                        `;
+                      }
                       return `
                         <button type="button" onclick="selectOAuthRepo('${esc(r.repo)}', '${esc(presetKey)}', '${esc(r.defaultBranch || 'main')}')" class="p-3 rounded-xl border text-left flex items-center gap-2.5 transition ${selected ? 'border-indigo-500/50 bg-gradient-to-br from-indigo-500/15 to-sky-500/5 ring-2 ring-indigo-500/15' : 'border-[var(--border)] bg-[var(--content)] hover:bg-[var(--accent)]'}">
                           ${stackIconHtml(presetKey, 'sm')}
@@ -3031,8 +3140,15 @@ volumes:
             </div>
           `}
 
-          <div class="pt-3 border-t border-[var(--border)] flex items-center justify-end">
-            <button type="button" onclick="goWizardStep(2)" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 transition">
+          <div class="pt-3 border-t border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+            <div class="text-xs">
+              ${activeDeployed
+                ? `<span class="text-amber-400 font-medium">⚠️ "${esc(activeDeployed.name)}" đã được deploy — hãy quản lý hoặc Redeploy ở tab Tổng quan.</span>`
+                : (w.scmMode === 'oauth' && !w.oauthRepo && state.scm.repos.length > 0
+                  ? `<span class="text-emerald-400 font-medium">✓ Tất cả repository hiện tại đều đã được deploy.</span>`
+                  : `<span class="text-[var(--muted-foreground)]">Sẵn sàng quét cấu trúc repo &amp; tạo Dockerfile.</span>`)}
+            </div>
+            <button type="button" ${blockNext ? 'disabled' : ''} onclick="goWizardStep(2)" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm shadow-indigo-500/25 hover:opacity-95 disabled:opacity-50 disabled:cursor-not-allowed transition">
               Tiếp tục Bước 2: Auto-Detect Stack →
             </button>
           </div>
@@ -3079,6 +3195,11 @@ volumes:
     }
 
     function selectOAuthRepo(repo, preset, defaultBranch) {
+      const deployedProj = findDeployedProjectForRepo(repo);
+      if (deployedProj) {
+        showToast(`Repo ${repo} đã được deploy — dùng Redeploy tại tab Tổng quan.`, 'warn');
+        return;
+      }
       const slug = repo.split('/').pop();
       state.wizard.oauthRepo = repo;
       state.wizard.appName = slug;
