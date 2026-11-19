@@ -175,6 +175,8 @@ type deploymentState struct {
 // Engine manages projects, containers, images, proxy routes, secrets, and async deployments.
 type Engine struct {
 	mu                     sync.RWMutex
+	traefikSyncMu          sync.Mutex
+	dynamicFileMu          sync.Mutex
 	vault                  *vault.Vault
 	vps                    VPSStatus
 	projects               []Project

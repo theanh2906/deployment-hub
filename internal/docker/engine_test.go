@@ -1,10 +1,13 @@
 package docker
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -402,4 +405,77 @@ func TestEngineConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestTraefikConfigMatchesAndWriteFileAtomic(t *testing.T) {
+	desired := map[string]string{
+		"--providers.file.directory":                              "/etc/traefik/dynamic",
+		"--providers.file.watch":                                  "true",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge":    "true",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.provider": "cloudflare",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers": "1.1.1.1:53,8.8.8.8:53",
+		"--certificatesresolvers.cloudflare.acme.email":           "theanh2906@gmail.com",
+		"--certificatesresolvers.cloudflare.acme.storage":         "/letsencrypt/acme.json",
+	}
+
+	env := []string{"PATH=/usr/local/sbin:/usr/local/bin", "CF_DNS_API_TOKEN=cf_tok_123"}
+	cmd := []string{
+		"--providers.docker=true",
+		"--certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json",
+		"--certificatesresolvers.cloudflare.acme.email=theanh2906@gmail.com",
+		"--providers.file.watch=true",
+		"--providers.file.directory=/etc/traefik/dynamic",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge=true",
+	}
+
+	if !traefikConfigMatches(env, cmd, "cf_tok_123", desired) {
+		t.Fatal("expected traefikConfigMatches=true when token and all flags match regardless of order")
+	}
+	if traefikConfigMatches(env, cmd, "cf_tok_other", desired) {
+		t.Fatal("expected traefikConfigMatches=false when token differs")
+	}
+	cmdDiffFlag := append([]string(nil), cmd...)
+	cmdDiffFlag[2] = "--certificatesresolvers.cloudflare.acme.email=other@example.com"
+	if traefikConfigMatches(env, cmdDiffFlag, "cf_tok_123", desired) {
+		t.Fatal("expected traefikConfigMatches=false when a flag value differs")
+	}
+
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "hub-domain.yml")
+	first := []byte("http:\n  routers:\n    demo: {}\n")
+	if err := writeFileAtomic(targetPath, first, 0o644); err != nil {
+		t.Fatalf("first writeFileAtomic failed: %v", err)
+	}
+	got, err := os.ReadFile(targetPath)
+	if err != nil || !bytes.Equal(got, first) {
+		t.Fatalf("unexpected file contents after first write: err=%v got=%q", err, got)
+	}
+	info1, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+
+	// Same bytes should return nil without rewriting the file
+	time.Sleep(10 * time.Millisecond)
+	if err := writeFileAtomic(targetPath, first, 0o644); err != nil {
+		t.Fatalf("no-op writeFileAtomic failed: %v", err)
+	}
+	info2, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat 2 failed: %v", err)
+	}
+	if !info1.ModTime().Equal(info2.ModTime()) {
+		t.Fatalf("expected identical writeFileAtomic to skip disk write (mtime changed from %v to %v)", info1.ModTime(), info2.ModTime())
+	}
+
+	second := []byte("http:\n  routers:\n    demo2: {}\n")
+	if err := writeFileAtomic(targetPath, second, 0o644); err != nil {
+		t.Fatalf("second writeFileAtomic failed: %v", err)
+	}
+	got2, err := os.ReadFile(targetPath)
+	if err != nil || !bytes.Equal(got2, second) {
+		t.Fatalf("unexpected file contents after update: err=%v got=%q", err, got2)
+	}
 }

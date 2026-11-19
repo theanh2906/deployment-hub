@@ -21,6 +21,8 @@ func TestCloudflareManagerConnectUpsertSSLAndPersistence(t *testing.T) {
 	var mu sync.Mutex
 	sslMode := "flexible"
 	records := map[string]map[string]any{}
+	postCount := 0
+	putCount := 0
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+testToken {
@@ -80,6 +82,7 @@ func TestCloudflareManagerConnectUpsertSSLAndPersistence(t *testing.T) {
 			})
 
 		case r.Method == http.MethodPost && r.URL.Path == "/zones/"+testZoneID+"/dns_records":
+			postCount++
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			id := "rec-1"
@@ -99,6 +102,7 @@ func TestCloudflareManagerConnectUpsertSSLAndPersistence(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": rec})
 
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/zones/"+testZoneID+"/dns_records/"):
+			putCount++
 			id := strings.TrimPrefix(r.URL.Path, "/zones/"+testZoneID+"/dns_records/")
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -153,7 +157,7 @@ func TestCloudflareManagerConnectUpsertSSLAndPersistence(t *testing.T) {
 		t.Fatalf("unexpected zones: %+v", zones)
 	}
 
-	// Upsert wildcard create + idempotent update
+	// Upsert wildcard create + idempotent update + no-op repeat
 	wc, err := mgr.UpsertARecord("*", "169.58.206.8", true)
 	if err != nil || wc.Name != "*."+testDomain || !wc.Proxied {
 		t.Fatalf("wildcard create failed: rec=%+v err=%v", wc, err)
@@ -161,6 +165,45 @@ func TestCloudflareManagerConnectUpsertSSLAndPersistence(t *testing.T) {
 	wc2, err := mgr.UpsertARecord("*."+testDomain, "169.58.206.8", false)
 	if err != nil || wc2.ID != wc.ID || wc2.Proxied {
 		t.Fatalf("wildcard update idempotency failed: rec=%+v err=%v", wc2, err)
+	}
+	mu.Lock()
+	putsBeforeRepeat := putCount
+	postsBeforeRepeat := postCount
+	mu.Unlock()
+	if putsBeforeRepeat != 1 || postsBeforeRepeat != 1 {
+		t.Fatalf("expected 1 post and 1 put before no-op test, got post=%d put=%d", postsBeforeRepeat, putsBeforeRepeat)
+	}
+
+	// Repeating with identical IP & proxied flag should be an idempotent no-op (zero PUT calls)
+	wc3, err := mgr.UpsertARecord("*."+testDomain, "169.58.206.8", false)
+	if err != nil || wc3.ID != wc.ID || wc3.Proxied {
+		t.Fatalf("wildcard repeat failed: rec=%+v err=%v", wc3, err)
+	}
+	mu.Lock()
+	putsAfterRepeat := putCount
+	mu.Unlock()
+	if putsAfterRepeat != putsBeforeRepeat {
+		t.Fatalf("expected identical UpsertARecord to skip PUT; puts went from %d to %d", putsBeforeRepeat, putsAfterRepeat)
+	}
+
+	// Concurrent UpsertARecord burst for the same record must serialize cleanly without duplicate POSTs
+	var burstWG sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		burstWG.Add(1)
+		go func() {
+			defer burstWG.Done()
+			if _, upsertErr := mgr.UpsertARecord("api", "169.58.206.8", true); upsertErr != nil {
+				t.Errorf("concurrent UpsertARecord failed: %v", upsertErr)
+			}
+		}()
+	}
+	burstWG.Wait()
+	mu.Lock()
+	postsAfterBurst := postCount
+	putsAfterBurst := putCount
+	mu.Unlock()
+	if postsAfterBurst != 2 || putsAfterBurst != putsAfterRepeat {
+		t.Fatalf("expected serialized concurrent UpsertARecord to execute 1 POST and 0 PUTs; post=%d put=%d", postsAfterBurst, putsAfterBurst)
 	}
 
 	// Set SSL mode strict

@@ -19,6 +19,9 @@ import (
 	"time"
 )
 
+// ErrOperationInProgress is returned when a conflicting Traefik/SSL operation is already running.
+var ErrOperationInProgress = errors.New("another Traefik/SSL configuration operation is already in progress")
+
 // SSLSettings holds global ACME / Let's Encrypt configuration for Traefik reverse proxy routes.
 type SSLSettings struct {
 	Provider          string `json:"provider"`
@@ -340,6 +343,11 @@ func traefikDynamicDir() string {
 // SyncTraefikCloudflareDNS01 configures deploymenthub-traefik with CF_DNS_API_TOKEN and
 // the Cloudflare ACME DNS-01 challenge resolver, preserving all networks, ports, and volumes.
 func (e *Engine) SyncTraefikCloudflareDNS01(cfToken, acmeEmail, baseDomain string) error {
+	if !e.traefikSyncMu.TryLock() {
+		return ErrOperationInProgress
+	}
+	defer e.traefikSyncMu.Unlock()
+
 	e.mu.RLock()
 	runtimeMode := e.vps.RuntimeMode
 	endpoint := e.vps.SocketEndpoint
@@ -361,6 +369,16 @@ func (e *Engine) SyncTraefikCloudflareDNS01(cfToken, acmeEmail, baseDomain strin
 		email = "theanh2906@gmail.com"
 	}
 
+	desiredFlags := map[string]string{
+		"--providers.file.directory":                                  "/etc/traefik/dynamic",
+		"--providers.file.watch":                                      "true",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge":        "true",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.provider": "cloudflare",
+		"--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers": "1.1.1.1:53,8.8.8.8:53",
+		"--certificatesresolvers.cloudflare.acme.email":               email,
+		"--certificatesresolvers.cloudflare.acme.storage":             "/letsencrypt/acme.json",
+	}
+
 	client, baseURL, ok := newDockerHTTPClient(endpoint, 45*time.Second)
 	if !ok {
 		return errors.New("docker engine client unavailable")
@@ -369,6 +387,16 @@ func (e *Engine) SyncTraefikCloudflareDNS01(cfToken, acmeEmail, baseDomain strin
 	inspectData, hasInspect := fetchDockerJSON[dockerContainerInspect](client, baseURL+"/containers/deploymenthub-traefik/json")
 	if !hasInspect {
 		return errors.New("failed to inspect deploymenthub-traefik container")
+	}
+
+	if traefikConfigMatches(inspectData.Config.Env, inspectData.Config.Cmd, cfToken, desiredFlags) {
+		if cleanBase := strings.ToLower(strings.TrimSpace(baseDomain)); cleanBase != "" {
+			_ = e.writeWildcardWarmupDynamicConfig(cleanBase)
+		}
+		if e.cf != nil {
+			e.cf.SetTraefikDNS01Status(true)
+		}
+		return nil
 	}
 
 	// Update env with CF_DNS_API_TOKEN
@@ -382,15 +410,7 @@ func (e *Engine) SyncTraefikCloudflareDNS01(cfToken, acmeEmail, baseDomain strin
 	newEnv = append(newEnv, "CF_DNS_API_TOKEN="+strings.TrimSpace(cfToken))
 
 	// Update Cmd flags idempotently with cloudflare DNS-01 resolver + dynamic file provider
-	newCmd := mergeTraefikCmdFlags(inspectData.Config.Cmd, map[string]string{
-		"--providers.file.directory":                              "/etc/traefik/dynamic",
-		"--providers.file.watch":                                  "true",
-		"--certificatesresolvers.cloudflare.acme.dnschallenge":    "true",
-		"--certificatesresolvers.cloudflare.acme.dnschallenge.provider": "cloudflare",
-		"--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers": "1.1.1.1:53,8.8.8.8:53",
-		"--certificatesresolvers.cloudflare.acme.email":           email,
-		"--certificatesresolvers.cloudflare.acme.storage":         "/letsencrypt/acme.json",
-	})
+	newCmd := mergeTraefikCmdFlags(inspectData.Config.Cmd, desiredFlags)
 
 	netMode := inspectData.HostConfig.NetworkMode
 	if netMode == "" {
@@ -473,13 +493,74 @@ func (e *Engine) SyncTraefikCloudflareDNS01(cfToken, acmeEmail, baseDomain strin
 
 	// Write a dynamic router file requesting the wildcard certificate immediately on Traefik
 	if cleanBase := strings.ToLower(strings.TrimSpace(baseDomain)); cleanBase != "" {
-		_ = writeWildcardWarmupDynamicConfig(cleanBase)
+		_ = e.writeWildcardWarmupDynamicConfig(cleanBase)
 		go triggerTraefikACMEWarmup("*." + cleanBase)
 	}
 
 	if e.cf != nil {
 		e.cf.SetTraefikDNS01Status(true)
 	}
+	return nil
+}
+
+func traefikConfigMatches(existingEnv, existingCmd []string, wantToken string, wantFlags map[string]string) bool {
+	wantEnv := "CF_DNS_API_TOKEN=" + strings.TrimSpace(wantToken)
+	foundToken := false
+	for _, kv := range existingEnv {
+		if kv == wantEnv {
+			foundToken = true
+			break
+		}
+	}
+	if !foundToken {
+		return false
+	}
+
+	actualFlags := make(map[string]string, len(existingCmd))
+	for _, arg := range existingCmd {
+		if k, v, ok := strings.Cut(arg, "="); ok {
+			actualFlags[k] = v
+		}
+	}
+	for k, wantVal := range wantFlags {
+		if gotVal, ok := actualFlags[k]; !ok || gotVal != wantVal {
+			return false
+		}
+	}
+	return true
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
 	return nil
 }
 
@@ -510,7 +591,10 @@ func mergeTraefikCmdFlags(existing []string, desired map[string]string) []string
 	return out
 }
 
-func writeWildcardWarmupDynamicConfig(baseDomain string) error {
+func (e *Engine) writeWildcardWarmupDynamicConfig(baseDomain string) error {
+	e.dynamicFileMu.Lock()
+	defer e.dynamicFileMu.Unlock()
+
 	dir := traefikDynamicDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -529,7 +613,7 @@ tls:
           sans:
             - "*.%s"
 `, baseDomain, baseDomain, baseDomain)
-	return os.WriteFile(cfgPath, []byte(content), 0o644)
+	return writeFileAtomic(cfgPath, []byte(content), 0o644)
 }
 
 // ConfigureHubDomain writes a dynamic Traefik route for the DeploymentHub control plane UI itself
@@ -538,10 +622,6 @@ func (e *Engine) ConfigureHubDomain(hubDomain string, useCFDNS01 bool, baseDomai
 	cleanDomain := strings.ToLower(strings.TrimSpace(hubDomain))
 	if cleanDomain == "" {
 		return errors.New("hub domain is required")
-	}
-	dir := traefikDynamicDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create traefik dynamic dir: %w", err)
 	}
 
 	resolver := "letsencrypt"
@@ -581,7 +661,15 @@ http:
           - url: "http://deploymenthub-control-plane:4180"
 `, cleanDomain, cleanDomain, resolver, tlsDomainsBlock)
 
-	if err := os.WriteFile(filepath.Join(dir, "hub-domain.yml"), []byte(yml), 0o644); err != nil {
+	e.dynamicFileMu.Lock()
+	dir := traefikDynamicDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.dynamicFileMu.Unlock()
+		return fmt.Errorf("create traefik dynamic dir: %w", err)
+	}
+	err := writeFileAtomic(filepath.Join(dir, "hub-domain.yml"), []byte(yml), 0o644)
+	e.dynamicFileMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("write hub-domain.yml: %w", err)
 	}
 	if e.cf != nil {

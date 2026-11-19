@@ -64,6 +64,7 @@ type DNSRecord struct {
 // Manager provides thread-safe Cloudflare API v4 operations and encrypted persistence.
 type Manager struct {
 	mu           sync.RWMutex
+	dnsMu        sync.Mutex
 	vault        *vault.Vault
 	dataFilePath string
 	apiBaseURL   string
@@ -272,6 +273,9 @@ func (m *Manager) ListDNSRecords() ([]DNSRecord, error) {
 // UpsertARecord creates or updates an A record in the connected Cloudflare zone.
 // Passing name="*" or "*.<baseDomain>" targets the wildcard record.
 func (m *Manager) UpsertARecord(fqdn, ip string, proxied bool) (DNSRecord, error) {
+	m.dnsMu.Lock()
+	defer m.dnsMu.Unlock()
+
 	token, zoneID, baseDomain, err := m.authContext()
 	if err != nil {
 		return DNSRecord{}, err
@@ -298,44 +302,49 @@ func (m *Manager) UpsertARecord(fqdn, ip string, proxied bool) (DNSRecord, error
 		return DNSRecord{}, err
 	}
 
-	payload := map[string]any{
-		"type":    "A",
-		"name":    targetName,
-		"content": targetIP,
-		"ttl":     1,
-		"proxied": proxied,
-	}
-
-	type rawRecord struct {
-		ID         string `json:"id"`
-		Type       string `json:"type"`
-		Name       string `json:"name"`
-		Content    string `json:"content"`
-		TTL        int    `json:"ttl"`
-		Proxied    bool   `json:"proxied"`
-		ModifiedOn string `json:"modified_on"`
-	}
-
-	var saved rawRecord
-	if len(existing) > 0 {
-		path := fmt.Sprintf("/zones/%s/dns_records/%s", url.PathEscape(zoneID), url.PathEscape(existing[0].ID))
-		saved, err = doCFRequest[rawRecord](m, http.MethodPut, path, token, payload)
+	var rec DNSRecord
+	if len(existing) > 0 && existing[0].Content == targetIP && existing[0].Proxied == proxied {
+		rec = existing[0]
 	} else {
-		path := fmt.Sprintf("/zones/%s/dns_records", url.PathEscape(zoneID))
-		saved, err = doCFRequest[rawRecord](m, http.MethodPost, path, token, payload)
-	}
-	if err != nil {
-		return DNSRecord{}, err
-	}
+		payload := map[string]any{
+			"type":    "A",
+			"name":    targetName,
+			"content": targetIP,
+			"ttl":     1,
+			"proxied": proxied,
+		}
 
-	rec := DNSRecord{
-		ID:         saved.ID,
-		Type:       saved.Type,
-		Name:       saved.Name,
-		Content:    saved.Content,
-		TTL:        saved.TTL,
-		Proxied:    saved.Proxied,
-		ModifiedOn: saved.ModifiedOn,
+		type rawRecord struct {
+			ID         string `json:"id"`
+			Type       string `json:"type"`
+			Name       string `json:"name"`
+			Content    string `json:"content"`
+			TTL        int    `json:"ttl"`
+			Proxied    bool   `json:"proxied"`
+			ModifiedOn string `json:"modified_on"`
+		}
+
+		var saved rawRecord
+		if len(existing) > 0 {
+			path := fmt.Sprintf("/zones/%s/dns_records/%s", url.PathEscape(zoneID), url.PathEscape(existing[0].ID))
+			saved, err = doCFRequest[rawRecord](m, http.MethodPut, path, token, payload)
+		} else {
+			path := fmt.Sprintf("/zones/%s/dns_records", url.PathEscape(zoneID))
+			saved, err = doCFRequest[rawRecord](m, http.MethodPost, path, token, payload)
+		}
+		if err != nil {
+			return DNSRecord{}, err
+		}
+
+		rec = DNSRecord{
+			ID:         saved.ID,
+			Type:       saved.Type,
+			Name:       saved.Name,
+			Content:    saved.Content,
+			TTL:        saved.TTL,
+			Proxied:    saved.Proxied,
+			ModifiedOn: saved.ModifiedOn,
+		}
 	}
 
 	if strings.EqualFold(rec.Name, "*."+baseDomain) {
@@ -354,6 +363,9 @@ func (m *Manager) UpsertARecord(fqdn, ip string, proxied bool) (DNSRecord, error
 
 // DeleteDNSRecord deletes a DNS record by ID from the connected Cloudflare zone.
 func (m *Manager) DeleteDNSRecord(recordID string) error {
+	m.dnsMu.Lock()
+	defer m.dnsMu.Unlock()
+
 	cleanID := strings.TrimSpace(recordID)
 	if cleanID == "" {
 		return errors.New("recordId is required")
@@ -398,6 +410,9 @@ func (m *Manager) GetSSLMode() (string, error) {
 
 // SetSSLMode updates the Cloudflare Zone SSL/TLS encryption mode (e.g. "strict").
 func (m *Manager) SetSSLMode(mode string) (string, error) {
+	m.dnsMu.Lock()
+	defer m.dnsMu.Unlock()
+
 	normalized := strings.ToLower(strings.TrimSpace(mode))
 	switch normalized {
 	case "off", "flexible", "full", "strict":

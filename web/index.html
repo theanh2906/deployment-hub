@@ -550,9 +550,14 @@
       cloudflare: {
         loading: false,
         connecting: false,
+        disconnecting: false,
+        updatingSslMode: false,
         settingUpWildcard: false,
         savingHub: false,
         creatingRecord: false,
+        editingWildcard: false,
+        editingHub: false,
+        busyRecordKeys: {},
         error: '',
         config: {
           enabled: false,
@@ -3587,6 +3592,11 @@ volumes:
       const records = Array.isArray(cf.records) ? cf.records : [];
       const baseDom = cfg.baseDomain || form.baseDomain || 'bennasolutions.com';
       const sslStrict = String(cfg.sslMode || '').toLowerCase() === 'strict';
+      const wildcardConfigured = Boolean(cfg.wildcardEnabled && cfg.traefikDns01 && sslStrict);
+      const editingWildcard = Boolean(cf.editingWildcard);
+      const hubConfigured = Boolean(cfg.hubDomain);
+      const editingHub = Boolean(cf.editingHub);
+      const busyKeys = cf.busyRecordKeys || {};
 
       if (!cfg.enabled) {
         return `
@@ -3653,58 +3663,106 @@ volumes:
               </div>
             </div>
             <div class="flex items-center gap-1.5">
-              <button type="button" onclick="fetchCloudflareStatus({ silent: false })" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">${cf.loading ? 'Đang sync...' : '↻ Sync DNS'}</button>
-              <button type="button" onclick="disconnectCloudflare()" class="px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25 text-xs font-medium">Ngắt kết nối</button>
+              <button type="button" ${cf.loading ? 'disabled' : ''} onclick="fetchCloudflareStatus({ silent: false })" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium disabled:opacity-60 disabled:cursor-not-allowed transition">${cf.loading ? 'Đang sync...' : '↻ Sync DNS'}</button>
+              <button type="button" ${cf.disconnecting ? 'disabled' : ''} onclick="disconnectCloudflare()" class="px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25 text-xs font-medium disabled:opacity-60 disabled:cursor-not-allowed transition">${cf.disconnecting ? 'Đang ngắt...' : 'Ngắt kết nối'}</button>
             </div>
           </div>
 
           ${!sslStrict && cfg.sslMode ? `
             <div class="p-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 flex flex-wrap items-center justify-between gap-2 text-xs">
               <span class="text-amber-300">⚠️ Cloudflare Zone SSL hiện đang là <code class="font-mono font-semibold">${esc(cfg.sslMode)}</code> — cần chuyển sang <code class="font-mono font-semibold">strict</code> (Full Strict) để tránh lỗi ERR_TOO_MANY_REDIRECTS.</span>
-              <button type="button" onclick="setCloudflareSslStrict()" class="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold text-xs shrink-0">Chuyển sang Full (strict)</button>
+              <button type="button" ${cf.updatingSslMode ? 'disabled' : ''} onclick="setCloudflareSslStrict()" class="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold text-xs shrink-0 disabled:opacity-60 disabled:cursor-not-allowed transition">${cf.updatingSslMode ? 'Đang chuyển...' : 'Chuyển sang Full (strict)'}</button>
             </div>
           ` : ''}
 
           <!-- 1-Click Wildcard & DNS-01 Setup + Control Plane Domain -->
           <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-3">
-            <div class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2.5">
-              <div class="text-xs font-semibold text-[var(--foreground)]">1-Click Wildcard <code class="font-mono text-amber-400">*.${esc(baseDom)}</code> &amp; Traefik DNS-01 SSL</div>
-              <div class="flex flex-wrap items-center gap-3 text-xs">
-                <label class="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" ${wf.proxied ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.proxied = this.checked" class="rounded" />
-                  <span>Orange Cloud Proxy ☁️</span>
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" ${wf.enforceFullStrict ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.enforceFullStrict = this.checked" class="rounded" />
-                  <span>Set Full (strict)</span>
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" ${wf.enableDns01 ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.enableDns01 = this.checked" class="rounded" />
-                  <span>Traefik DNS-01 Wildcard Cert</span>
-                </label>
+            ${(wildcardConfigured && !editingWildcard) ? `
+              <div class="rounded-xl border border-emerald-500/35 bg-emerald-500/5 p-3 flex flex-col justify-between gap-2.5">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="text-xs font-semibold text-[var(--foreground)]">Wildcard <code class="font-mono text-amber-400">*.${esc(baseDom)}</code> &amp; Traefik DNS-01 SSL</div>
+                  <span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold shrink-0">● Đang hoạt động</span>
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]">✓ *.${esc(baseDom)} → ${esc(cfg.serverIp || form.serverIp)}</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--content)] border border-[var(--border)] font-mono ${cfg.defaultProxied ? 'text-amber-400' : 'text-[var(--muted-foreground)]'}">${cfg.defaultProxied ? '☁️ Orange Cloud' : 'DNS Only'}</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--content)] border border-[var(--border)] font-mono text-emerald-400">✓ SSL Full (strict)</span>
+                  <span class="px-2 py-0.5 rounded-md bg-[var(--content)] border border-[var(--border)] font-mono text-emerald-400">✓ Traefik DNS-01</span>
+                </div>
+                <div class="flex items-center justify-between gap-2 pt-0.5">
+                  <span class="text-[11px] text-[var(--muted-foreground)] truncate">Mọi app mới tự nhận subdomain <code class="font-mono">*.${esc(baseDom)}</code> + SSL tự động.</span>
+                  <button type="button" onclick="toggleEditCloudflareWildcard(true)" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-[11px] font-medium shrink-0 transition">Cấu hình lại</button>
+                </div>
               </div>
-              <button type="button" ${cf.settingUpWildcard ? 'disabled' : ''} onclick="setupCloudflareWildcard()" class="w-full py-1.5 px-3 rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-emerald-500 text-white text-xs font-semibold shadow-sm hover:opacity-95 disabled:opacity-60 transition">
-                ${cf.settingUpWildcard ? 'Đang tạo Wildcard DNS & Cấu hình Traefik DNS-01...' : `🚀 Kích hoạt Wildcard *.${esc(baseDom)} & Wildcard SSL`}
-              </button>
-            </div>
+            ` : `
+              <div class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2.5">
+                <div class="text-xs font-semibold text-[var(--foreground)]">1-Click Wildcard <code class="font-mono text-amber-400">*.${esc(baseDom)}</code> &amp; Traefik DNS-01 SSL</div>
+                <div class="flex flex-wrap items-center gap-3 text-xs">
+                  <label class="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" ${wf.proxied ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.proxied = this.checked" class="rounded" />
+                    <span>Orange Cloud Proxy ☁️</span>
+                  </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" ${wf.enforceFullStrict ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.enforceFullStrict = this.checked" class="rounded" />
+                    <span>Set Full (strict)</span>
+                  </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" ${wf.enableDns01 ? 'checked' : ''} onchange="state.cloudflare.wildcardForm.enableDns01 = this.checked" class="rounded" />
+                    <span>Traefik DNS-01 Wildcard Cert</span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button type="button" ${cf.settingUpWildcard ? 'disabled' : ''} onclick="setupCloudflareWildcard()" class="flex-1 py-1.5 px-3 rounded-xl ${editingWildcard ? 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]' : 'bg-gradient-to-r from-amber-500 via-orange-500 to-emerald-500 text-white shadow-sm hover:opacity-95'} text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition">
+                    ${cf.settingUpWildcard
+                      ? 'Đang tạo Wildcard DNS & Cấu hình Traefik DNS-01...'
+                      : (editingWildcard ? '↻ Lưu & Cập nhật cấu hình' : `🚀 Kích hoạt Wildcard *.${esc(baseDom)} & Wildcard SSL`)}
+                  </button>
+                  ${editingWildcard ? `
+                    <button type="button" ${cf.settingUpWildcard ? 'disabled' : ''} onclick="toggleEditCloudflareWildcard(false)" class="px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] text-xs font-medium disabled:opacity-60 disabled:cursor-not-allowed transition">Hủy</button>
+                  ` : ''}
+                </div>
+              </div>
+            `}
 
-            <form onsubmit="configureHubCloudflareDomain(event)" class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs font-semibold text-[var(--foreground)]">Gắn Domain cho trang Quản trị DeploymentHub</span>
-                ${cfg.hubDomain ? `<a href="https://${esc(cfg.hubDomain)}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-mono text-sky-400 hover:underline">${esc(cfg.hubDomain)} ↗</a>` : ''}
+            ${(hubConfigured && !editingHub) ? `
+              <div class="rounded-xl border border-sky-500/35 bg-sky-500/5 p-3 flex flex-col justify-between gap-2.5">
+                <div class="flex items-start justify-between gap-2">
+                  <span class="text-xs font-semibold text-[var(--foreground)]">Domain trang Quản trị DeploymentHub</span>
+                  <span class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold shrink-0">✓ Đã gắn</span>
+                </div>
+                <a href="https://${esc(cfg.hubDomain)}" target="_blank" rel="noopener noreferrer" class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] hover:border-sky-500/50 text-xs font-mono text-sky-400 transition">
+                  <span class="truncate">🔒 https://${esc(cfg.hubDomain)}</span>
+                  <span class="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 shrink-0">Mở trang ↗</span>
+                </a>
+                <div class="flex items-center justify-between gap-2 pt-0.5">
+                  <span class="text-[11px] text-[var(--muted-foreground)] font-mono truncate">Traefik HTTPS • ${cfg.traefikDns01 ? 'Wildcard DNS-01' : "Let's Encrypt"}</span>
+                  <button type="button" onclick="toggleEditCloudflareHub(true)" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-[11px] font-medium shrink-0 transition">Đổi domain</button>
+                </div>
               </div>
-              <div class="flex items-center gap-1.5">
-                <input type="text" value="${esc(cf.hubSubdomain || 'hub')}" oninput="state.cloudflare.hubSubdomain = this.value" placeholder="hub" class="w-28 px-2.5 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
-                <span class="text-xs font-mono text-[var(--muted-foreground)] truncate">.${esc(baseDom)}</span>
-                <label class="flex items-center gap-1 text-[11px] text-[var(--muted-foreground)] ml-auto shrink-0 cursor-pointer">
-                  <input type="checkbox" ${cf.hubProxied ? 'checked' : ''} onchange="state.cloudflare.hubProxied = this.checked" class="rounded" />
-                  <span>☁️</span>
-                </label>
-              </div>
-              <button type="submit" ${cf.savingHub ? 'disabled' : ''} class="w-full py-1.5 px-3 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-xs font-semibold transition">
-                ${cf.savingHub ? 'Đang gắn route Traefik...' : `🏠 Gắn https://${esc((cf.hubSubdomain || 'hub').replace(/\..*$/, ''))}.${esc(baseDom)}`}
-              </button>
-            </form>
+            ` : `
+              <form onsubmit="configureHubCloudflareDomain(event)" class="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-semibold text-[var(--foreground)]">Gắn Domain cho trang Quản trị DeploymentHub</span>
+                  ${cfg.hubDomain ? `<a href="https://${esc(cfg.hubDomain)}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-mono text-sky-400 hover:underline">${esc(cfg.hubDomain)} ↗</a>` : ''}
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <input type="text" value="${esc(cf.hubSubdomain || 'hub')}" oninput="state.cloudflare.hubSubdomain = this.value" placeholder="hub" class="w-28 px-2.5 py-1.5 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                  <span class="text-xs font-mono text-[var(--muted-foreground)] truncate">.${esc(baseDom)}</span>
+                  <label class="flex items-center gap-1 text-[11px] text-[var(--muted-foreground)] ml-auto shrink-0 cursor-pointer">
+                    <input type="checkbox" ${cf.hubProxied ? 'checked' : ''} onchange="state.cloudflare.hubProxied = this.checked" class="rounded" />
+                    <span>☁️</span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button type="submit" ${cf.savingHub ? 'disabled' : ''} class="flex-1 py-1.5 px-3 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition">
+                    ${cf.savingHub ? 'Đang gắn route Traefik...' : (editingHub ? 'Lưu thay đổi' : `🏠 Gắn https://${esc((cf.hubSubdomain || 'hub').replace(/\..*$/, ''))}.${esc(baseDom)}`)}
+                  </button>
+                  ${editingHub ? `
+                    <button type="button" ${cf.savingHub ? 'disabled' : ''} onclick="toggleEditCloudflareHub(false)" class="px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] text-xs font-medium disabled:opacity-60 disabled:cursor-not-allowed transition">Hủy</button>
+                  ` : ''}
+                </div>
+              </form>
+            `}
           </div>
 
           <!-- Live DNS Records Table + Quick Add -->
@@ -3718,8 +3776,8 @@ volumes:
                   <input type="checkbox" ${cf.newRecord?.proxied ? 'checked' : ''} onchange="state.cloudflare.newRecord.proxied = this.checked" class="rounded" />
                   <span>☁️ Proxy</span>
                 </label>
-                <button type="submit" ${cf.creatingRecord ? 'disabled' : ''} class="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/35 hover:bg-amber-500/30 text-xs font-semibold">
-                  + Thêm Record
+                <button type="submit" ${cf.creatingRecord ? 'disabled' : ''} class="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/35 hover:bg-amber-500/30 text-xs font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition">
+                  ${cf.creatingRecord ? 'Đang thêm...' : '+ Thêm Record'}
                 </button>
               </form>
             </div>
@@ -3737,23 +3795,26 @@ volumes:
                 <tbody class="divide-y divide-[var(--border)]">
                   ${records.length === 0 ? `
                     <tr><td colspan="5" class="py-6 text-center text-[var(--muted-foreground)]">Chưa có DNS record nào trong Zone ${esc(cfg.baseDomain)}.</td></tr>
-                  ` : records.map(rec => `
+                  ` : records.map(rec => {
+                    const rowBusy = Boolean(busyKeys[rec.id] || busyKeys[rec.name]);
+                    return `
                     <tr class="hover:bg-[var(--content)]/40">
                       <td class="py-2 px-3 font-mono font-semibold text-indigo-400">${esc(rec.type)}</td>
                       <td class="py-2 px-3 font-mono text-[var(--foreground)]">${esc(rec.name)}</td>
                       <td class="py-2 px-3 font-mono text-[var(--muted-foreground)] truncate max-w-[200px]">${esc(rec.content)}</td>
                       <td class="py-2 px-3">
                         ${rec.type === 'A' ? `
-                          <button type="button" onclick="toggleCloudflareRecordProxy(${escJsArg(rec.name)}, ${escJsArg(rec.content)}, ${!rec.proxied})" class="px-2 py-0.5 rounded-full text-[11px] font-medium border ${rec.proxied ? 'bg-amber-500/15 text-amber-400 border-amber-500/35' : 'bg-[var(--content)] text-[var(--muted-foreground)] border-[var(--border)]'}">
+                          <button type="button" ${rowBusy ? 'disabled' : ''} onclick="toggleCloudflareRecordProxy(${escJsArg(rec.name)}, ${escJsArg(rec.content)}, ${!rec.proxied})" class="px-2 py-0.5 rounded-full text-[11px] font-medium border ${rec.proxied ? 'bg-amber-500/15 text-amber-400 border-amber-500/35' : 'bg-[var(--content)] text-[var(--muted-foreground)] border-[var(--border)]'} disabled:opacity-60 disabled:cursor-not-allowed transition">
                             ${rec.proxied ? '☁️ Proxied' : 'DNS Only'}
                           </button>
                         ` : `<span class="text-[var(--muted-foreground)] font-mono">${rec.proxied ? '☁️' : 'DNS Only'}</span>`}
                       </td>
                       <td class="py-2 px-3 text-right">
-                        <button type="button" onclick="deleteCloudflareDnsRecord(${escJsArg(rec.id)}, ${escJsArg(rec.name)})" class="text-rose-400 hover:underline font-medium">Xóa</button>
+                        <button type="button" ${rowBusy ? 'disabled' : ''} onclick="deleteCloudflareDnsRecord(${escJsArg(rec.id)}, ${escJsArg(rec.name)})" class="text-rose-400 hover:underline font-medium disabled:opacity-60 disabled:cursor-not-allowed">${rowBusy ? 'Đang xóa...' : 'Xóa'}</button>
                       </td>
                     </tr>
-                  `).join('')}
+                  `;
+                  }).join('')}
                 </tbody>
               </table>
             </div>
@@ -4075,8 +4136,35 @@ volumes:
       }
     }
 
+    function toggleEditCloudflareWildcard(editing) {
+      const cf = state.cloudflare;
+      const cfg = cf.config || {};
+      cf.editingWildcard = Boolean(editing);
+      if (cf.editingWildcard) {
+        cf.wildcardForm.proxied = Boolean(cfg.defaultProxied);
+        cf.wildcardForm.enforceFullStrict = true;
+        cf.wildcardForm.enableDns01 = true;
+      }
+      renderMainView();
+    }
+
+    function toggleEditCloudflareHub(editing) {
+      const cf = state.cloudflare;
+      const cfg = cf.config || {};
+      cf.editingHub = Boolean(editing);
+      if (cf.editingHub && cfg.hubDomain && cfg.baseDomain) {
+        const suffix = '.' + cfg.baseDomain.toLowerCase();
+        const hd = String(cfg.hubDomain).toLowerCase();
+        if (hd.endsWith(suffix)) {
+          cf.hubSubdomain = hd.slice(0, hd.length - suffix.length) || 'hub';
+        }
+      }
+      renderMainView();
+    }
+
     async function fetchCloudflareStatus(opts = {}) {
       if (!canUseBackend()) return false;
+      if (state.cloudflare.loading && !opts.allowConcurrent) return false;
       state.cloudflare.loading = true;
       state.cloudflare.error = '';
       if (!opts.skipRender && state.activeTab === 'proxy') renderMainView();
@@ -4089,6 +4177,9 @@ volumes:
         }
         if (res && Array.isArray(res.records)) state.cloudflare.records = res.records;
         if (res && res.error) state.cloudflare.error = res.error;
+        if (!state.cloudflare.editingWildcard && state.cloudflare.config && state.cloudflare.config.enabled) {
+          state.cloudflare.wildcardForm.proxied = Boolean(state.cloudflare.config.defaultProxied);
+        }
         if (state.cloudflare.config.enabled && state.cloudflare.config.baseDomain && state.wizard.domain.includes('.sslip.io')) {
           state.wizard.domain = defaultAppDomain(state.wizard.appName);
         }
@@ -4108,6 +4199,7 @@ volumes:
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
       if (!canUseBackend()) return;
       const cf = state.cloudflare;
+      if (cf.connecting) return;
       cf.connecting = true;
       cf.error = '';
       renderMainView();
@@ -4126,6 +4218,8 @@ volumes:
         if (res && Array.isArray(res.zones)) cf.zones = res.zones;
         if (res && Array.isArray(res.records)) cf.records = res.records;
         cf.form.apiToken = '';
+        cf.editingWildcard = false;
+        cf.editingHub = false;
         cf.connecting = false;
         if (cf.config && cf.config.baseDomain) {
           state.wizard.domain = defaultAppDomain(state.wizard.appName);
@@ -4142,21 +4236,34 @@ volumes:
 
     async function disconnectCloudflare() {
       if (!canUseBackend()) return;
+      const cf = state.cloudflare;
+      if (cf.disconnecting) return;
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm('Ngắt kết nối Cloudflare API? Token mã hóa sẽ bị xóa khỏi DeploymentHub (các DNS record trên Cloudflare vẫn được giữ nguyên).')) {
+        return;
+      }
+      cf.disconnecting = true;
+      cf.error = '';
+      renderMainView();
       try {
         const res = await apiFetch('/cloudflare/disconnect', { method: 'POST' });
-        state.cloudflare.config = (res && res.config) || { enabled: false };
-        state.cloudflare.records = [];
-        state.cloudflare.error = '';
-        renderMainView();
+        cf.config = (res && res.config) || { enabled: false };
+        cf.records = [];
+        cf.editingWildcard = false;
+        cf.editingHub = false;
+        cf.error = '';
         showToast('Đã ngắt kết nối Cloudflare API', 'warn');
       } catch (err) {
         showToast(err && err.message ? err.message : 'Lỗi ngắt kết nối Cloudflare', 'error');
+      } finally {
+        cf.disconnecting = false;
+        renderMainView();
       }
     }
 
     async function setupCloudflareWildcard() {
       if (!canUseBackend()) return;
       const cf = state.cloudflare;
+      if (cf.settingUpWildcard) return;
       cf.settingUpWildcard = true;
       cf.error = '';
       renderMainView();
@@ -4173,6 +4280,7 @@ volumes:
         if (res && res.config) cf.config = res.config;
         if (res && Array.isArray(res.records)) cf.records = res.records;
         if (res && res.dns01Warning) cf.error = res.dns01Warning;
+        cf.editingWildcard = false;
         cf.settingUpWildcard = false;
         await fetchSslOverview({ silent: true, skipRender: true });
         renderMainView();
@@ -4187,16 +4295,23 @@ volumes:
 
     async function setCloudflareSslStrict() {
       if (!canUseBackend()) return;
+      const cf = state.cloudflare;
+      if (cf.updatingSslMode) return;
+      cf.updatingSslMode = true;
+      cf.error = '';
+      renderMainView();
       try {
         const res = await apiFetch('/cloudflare/ssl-mode', {
           method: 'POST',
           body: JSON.stringify({ mode: 'strict' })
         });
-        if (res && res.config) state.cloudflare.config = res.config;
-        renderMainView();
+        if (res && res.config) cf.config = res.config;
         showToast('Đã chuyển Cloudflare SSL Mode sang Full (strict)!', 'success');
       } catch (err) {
         showToast(err && err.message ? err.message : 'Không thể đổi SSL Mode Cloudflare', 'error');
+      } finally {
+        cf.updatingSslMode = false;
+        renderMainView();
       }
     }
 
@@ -4204,6 +4319,7 @@ volumes:
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
       if (!canUseBackend()) return;
       const cf = state.cloudflare;
+      if (cf.savingHub) return;
       cf.savingHub = true;
       cf.error = '';
       renderMainView();
@@ -4217,8 +4333,9 @@ volumes:
           })
         });
         if (res && res.config) cf.config = res.config;
+        cf.editingHub = false;
         cf.savingHub = false;
-        await fetchCloudflareStatus({ silent: true, skipRender: true });
+        await fetchCloudflareStatus({ silent: true, skipRender: true, allowConcurrent: true });
         renderMainView();
         showToast(`Đã gắn https://${res.hubDomain} cho DeploymentHub!`, 'success');
       } catch (err) {
@@ -4233,6 +4350,7 @@ volumes:
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
       if (!canUseBackend()) return;
       const cf = state.cloudflare;
+      if (cf.creatingRecord) return;
       cf.creatingRecord = true;
       cf.error = '';
       renderMainView();
@@ -4247,7 +4365,7 @@ volumes:
         });
         cf.newRecord.name = '';
         cf.creatingRecord = false;
-        await fetchCloudflareStatus({ silent: true, skipRender: true });
+        await fetchCloudflareStatus({ silent: true, skipRender: true, allowConcurrent: true });
         renderMainView();
         showToast('Đã tạo DNS A Record trên Cloudflare!', 'success');
       } catch (err) {
@@ -4260,28 +4378,45 @@ volumes:
 
     async function toggleCloudflareRecordProxy(name, content, proxied) {
       if (!canUseBackend()) return;
+      const cf = state.cloudflare;
+      if (!cf.busyRecordKeys) cf.busyRecordKeys = {};
+      if (cf.busyRecordKeys[name]) return;
+      cf.busyRecordKeys[name] = true;
+      renderMainView();
       try {
         await apiFetch('/cloudflare/dns', {
           method: 'POST',
           body: JSON.stringify({ name, content, proxied: Boolean(proxied) })
         });
-        await fetchCloudflareStatus({ silent: true, skipRender: true });
-        renderMainView();
+        await fetchCloudflareStatus({ silent: true, skipRender: true, allowConcurrent: true });
         showToast(`${name}: ${proxied ? 'Đã bật Cloudflare Orange Cloud ☁️' : 'Đã chuyển sang DNS Only'}`, 'success');
       } catch (err) {
         showToast(err && err.message ? err.message : 'Lỗi cập nhật Proxy Cloudflare', 'error');
+      } finally {
+        delete cf.busyRecordKeys[name];
+        renderMainView();
       }
     }
 
     async function deleteCloudflareDnsRecord(id, name) {
       if (!canUseBackend()) return;
+      const cf = state.cloudflare;
+      if (!cf.busyRecordKeys) cf.busyRecordKeys = {};
+      if (cf.busyRecordKeys[id]) return;
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(`Xóa DNS record "${name}" trên Cloudflare?`)) {
+        return;
+      }
+      cf.busyRecordKeys[id] = true;
+      renderMainView();
       try {
         await apiFetch(`/cloudflare/dns/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        await fetchCloudflareStatus({ silent: true, skipRender: true });
-        renderMainView();
+        await fetchCloudflareStatus({ silent: true, skipRender: true, allowConcurrent: true });
         showToast(`Đã xóa DNS record ${name}`, 'warn');
       } catch (err) {
         showToast(err && err.message ? err.message : 'Lỗi xóa DNS record', 'error');
+      } finally {
+        delete cf.busyRecordKeys[id];
+        renderMainView();
       }
     }
 

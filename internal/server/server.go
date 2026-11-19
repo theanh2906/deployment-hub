@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"deploymenthub/internal/cloudflare"
@@ -24,11 +25,14 @@ import (
 const maxRequestBodyBytes = 2 << 20 // 2 MiB
 
 type apiServer struct {
-	engine        *docker.Engine
-	vault         *vault.Vault
-	mahHub        *mah.Hub
-	webhookSecret string
-	webFS         fs.FS
+	engine         *docker.Engine
+	vault          *vault.Vault
+	mahHub         *mah.Hub
+	webhookSecret  string
+	webFS          fs.FS
+	cfConnectBusy  atomic.Bool
+	cfWildcardBusy atomic.Bool
+	cfHubBusy      atomic.Bool
 }
 
 // New constructs the DeploymentHub HTTP handler wiring all REST, SSE, webhook,
@@ -237,6 +241,12 @@ func (s *apiServer) handleCloudflareStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *apiServer) handleCloudflareConnect(w http.ResponseWriter, r *http.Request) {
+	if !s.cfConnectBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang kết nối Cloudflare, vui lòng đợi...")
+		return
+	}
+	defer s.cfConnectBusy.Store(false)
+
 	var req struct {
 		APIToken       string `json:"apiToken"`
 		ZoneID         string `json:"zoneId"`
@@ -282,6 +292,12 @@ func (s *apiServer) handleCloudflareDisconnect(w http.ResponseWriter, r *http.Re
 }
 
 func (s *apiServer) handleCloudflareWildcard(w http.ResponseWriter, r *http.Request) {
+	if !s.cfWildcardBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang thiết lập Wildcard Cloudflare & Traefik, vui lòng đợi hoàn tất...")
+		return
+	}
+	defer s.cfWildcardBusy.Store(false)
+
 	var req struct {
 		Proxied           bool `json:"proxied"`
 		EnforceFullStrict bool `json:"enforceFullStrict"`
@@ -319,6 +335,10 @@ func (s *apiServer) handleCloudflareWildcard(w http.ResponseWriter, r *http.Requ
 				email = settings.ACMEEmail
 			}
 			if syncErr := s.engine.SyncTraefikCloudflareDNS01(token, email, cfg.BaseDomain); syncErr != nil {
+				if errors.Is(syncErr, docker.ErrOperationInProgress) {
+					writeError(w, http.StatusConflict, syncErr.Error())
+					return
+				}
 				dns01Warn = syncErr.Error()
 			}
 		} else {
@@ -394,6 +414,12 @@ func (s *apiServer) handleCloudflareSSLMode(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *apiServer) handleCloudflareHubDomain(w http.ResponseWriter, r *http.Request) {
+	if !s.cfHubBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang cấu hình domain DeploymentHub, vui lòng đợi...")
+		return
+	}
+	defer s.cfHubBusy.Store(false)
+
 	var req struct {
 		Subdomain string `json:"subdomain"`
 		Proxied   bool   `json:"proxied"`
