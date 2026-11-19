@@ -671,7 +671,62 @@
         eventFilter: 'all',
         eventsEs: null,
         eventsConnected: false,
-        eventsSyncTimer: null
+        eventsSyncTimer: null,
+        stacks: [],
+        loadingStacks: false,
+        templates: [],
+        stackEditor: {
+          name: '',
+          composeYaml: '',
+          envText: '',
+          envEntries: [],
+          editingExisting: false,
+          saving: false
+        },
+        stackOutput: {
+          stack: '',
+          action: '',
+          text: '',
+          success: true
+        },
+        registries: [],
+        loadingRegistries: false,
+        showRegistries: false,
+        newRegistry: { name: '', server: 'ghcr.io', username: '', password: '' },
+        pullForm: { image: '', registryId: '', pulling: false, output: [] },
+        runForm: {
+          name: '',
+          image: '',
+          registryId: '',
+          cmd: '',
+          portsText: '',
+          envText: '',
+          volumesText: '',
+          network: '',
+          restartPolicy: 'unless-stopped',
+          memoryMb: '',
+          cpuCores: '',
+          domain: '',
+          containerPort: '',
+          enableSsl: true,
+          forceHttps: false,
+          submitting: false,
+          error: ''
+        },
+        terminal: {
+          containerId: '',
+          containerName: '',
+          shell: 'auto',
+          ws: null,
+          term: null,
+          fitAddon: null,
+          resizeHandler: null,
+          connected: false,
+          connecting: false,
+          error: '',
+          fallbackBuffer: '',
+          fallbackInput: ''
+        }
       },
       mah: {
         subTab: 'overview',
@@ -962,6 +1017,22 @@
       });
     }
 
+    function loadCssOnce(href) {
+      return new Promise((resolve, reject) => {
+        if (typeof document === 'undefined') { resolve(); return; }
+        const existing = typeof document.querySelector === 'function'
+          ? document.querySelector(`link[rel="stylesheet"][href="${href}"]`)
+          : null;
+        if (existing) { resolve(); return; }
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = href;
+        link.onload = () => resolve();
+        link.onerror = () => reject(new Error(`Không thể tải CSS: ${href}`));
+        (document.head || document.body).appendChild(link);
+      });
+    }
+
     async function loadFirebaseAuthSDK() {
       const fbCfg = state.auth.firebase;
       if (!fbCfg || !fbCfg.apiKey || !fbCfg.projectId) {
@@ -1219,6 +1290,7 @@
       try {
         if (typeof stopModalLogStream === 'function') stopModalLogStream();
         if (typeof stopDockerEventsStream === 'function') stopDockerEventsStream();
+        if (typeof closeTerminalSession === 'function') closeTerminalSession();
         await apiFetch('/auth/logout', { method: 'POST' });
         a.authenticated = false;
         a.user = null;
@@ -4134,6 +4206,12 @@ volumes:
       return n === 'deploymenthub-traefik';
     }
 
+    function canExecContainer(c) {
+      if (!c || c.status !== 'Running') return false;
+      const n = String(c.name || '').replace(/^\/+/, '').toLowerCase();
+      return n !== 'deploymenthub-socket-proxy';
+    }
+
     function isEnvKeySecret(k) {
       return /(secret|token|key|password|passwd|pwd|private|credential|auth)/i.test(String(k || ''));
     }
@@ -4466,10 +4544,596 @@ volumes:
       };
     }
 
+    async function refreshStacks(opts = {}) {
+      if (!canUseBackend()) return [];
+      state.docker.loadingStacks = true;
+      if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'stacks') renderMainView();
+      try {
+        const res = await apiFetch('/stacks');
+        state.docker.stacks = Array.isArray(res.stacks) ? res.stacks : [];
+        return state.docker.stacks;
+      } catch (err) {
+        if (!opts.silent) showToast(err.message || 'Không thể tải danh sách Compose Stacks', 'error');
+        return [];
+      } finally {
+        state.docker.loadingStacks = false;
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'stacks') renderMainView();
+      }
+    }
+
+    async function refreshStackTemplates(opts = {}) {
+      if (!canUseBackend()) return [];
+      try {
+        const res = await apiFetch('/stacks/templates');
+        state.docker.templates = Array.isArray(res.templates) ? res.templates : [];
+        if (!opts.skipRender && state.activeTab === 'docker' && state.dockerSubTab === 'stacks') renderMainView();
+        return state.docker.templates;
+      } catch (err) {
+        if (!opts.silent) showToast(err.message || 'Không thể tải 1-Click DB Templates', 'error');
+        return [];
+      }
+    }
+
+    function applyStackTemplate(key) {
+      const tpl = (state.docker.templates || []).find(t => t.key === key);
+      if (!tpl) return;
+      state.docker.stackEditor = {
+        name: tpl.defaultName || tpl.key,
+        composeYaml: tpl.composeYaml || '',
+        envText: tpl.envText || '',
+        envEntries: [],
+        editingExisting: false,
+        saving: false
+      };
+      renderMainView();
+      showToast(`Đã nạp template "${tpl.name}" vào editor — kiểm tra rồi bấm Deploy Stack!`, 'info');
+    }
+
+    function resetStackEditor() {
+      state.docker.stackEditor = {
+        name: '',
+        composeYaml: '',
+        envText: '',
+        envEntries: [],
+        editingExisting: false,
+        saving: false
+      };
+      renderMainView();
+    }
+
+    async function loadStackForEdit(name) {
+      if (!canUseBackend()) return;
+      try {
+        const detail = await apiFetch(`/stacks/${encodeURIComponent(name)}`);
+        const entries = Array.isArray(detail.envEntries) ? detail.envEntries : [];
+        const envLines = entries.map(e => `${e.key}=${e.hasValue ? '••••••••' : ''}`).join('\n');
+        state.docker.stackEditor = {
+          name: detail.name || name,
+          composeYaml: detail.composeYaml || '',
+          envText: envLines,
+          envEntries: entries,
+          editingExisting: true,
+          saving: false
+        };
+        renderMainView();
+        showToast(`Đã tải cấu hình Compose stack "${name}"`, 'info');
+      } catch (err) {
+        showToast(err.message || `Không thể đọc chi tiết stack ${name}`, 'error');
+      }
+    }
+
+    async function submitDeployStack(e) {
+      if (e) e.preventDefault();
+      if (!canUseBackend()) return;
+      const ed = state.docker.stackEditor;
+      const name = String(ed.name || '').trim().toLowerCase();
+      if (!name || !String(ed.composeYaml || '').trim()) {
+        showToast('Vui lòng nhập Tên Stack và nội dung docker-compose.yml', 'warn');
+        return;
+      }
+      ed.saving = true;
+      state.docker.busyKey = `stack:${name}:deploy`;
+      renderMainView();
+      try {
+        const res = await apiFetch('/stacks', {
+          method: 'POST',
+          body: JSON.stringify({
+            name,
+            composeYaml: ed.composeYaml,
+            envText: ed.envText || ''
+          })
+        });
+        state.docker.stackOutput = {
+          stack: res.stack || name,
+          action: res.action || 'up',
+          text: res.output || '(Hoàn tất không có log)',
+          success: res.success !== false
+        };
+        showToast(`Đã deploy Compose stack "${name}" thành công!`, 'success');
+        await Promise.all([refreshOverview(), refreshStacks({ silent: true, skipRender: true })]);
+        renderHeader();
+      } catch (err) {
+        state.docker.stackOutput = {
+          stack: name,
+          action: 'up (error)',
+          text: err.message || 'Deploy stack thất bại',
+          success: false
+        };
+        showToast(err.message || 'Deploy stack thất bại', 'error');
+      } finally {
+        ed.saving = false;
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    async function runStackAction(name, action) {
+      if (!canUseBackend()) return;
+      if (action === 'down' && !confirm(`Dừng & gỡ containers của Compose stack "${name}"?`)) return;
+      state.docker.busyKey = `stack:${name}:${action}`;
+      renderMainView();
+      try {
+        const res = await apiFetch(`/stacks/${encodeURIComponent(name)}/action`, {
+          method: 'POST',
+          body: JSON.stringify({ action })
+        });
+        state.docker.stackOutput = {
+          stack: res.stack || name,
+          action: res.action || action,
+          text: res.output || '(No output)',
+          success: res.success !== false
+        };
+        if (action !== 'logs') {
+          showToast(`Compose ${action} "${name}" hoàn tất!`, 'success');
+          await Promise.all([refreshOverview(), refreshStacks({ silent: true, skipRender: true })]);
+          renderHeader();
+        }
+      } catch (err) {
+        state.docker.stackOutput = {
+          stack: name,
+          action: `${action} (error)`,
+          text: err.message || `Stack ${action} lỗi`,
+          success: false
+        };
+        showToast(err.message || `Lỗi thực thi ${action} trên stack ${name}`, 'error');
+      } finally {
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    async function removeStack(name, removeVolumes = false) {
+      if (!canUseBackend()) return;
+      const msg = removeVolumes
+        ? `XÓA VĨNH VIỄN Compose stack "${name}" CÙNG VOLUMES? Dữ liệu DB sẽ mất!`
+        : `Xóa Compose stack "${name}" (giữ lại named volumes)?`;
+      if (!confirm(msg)) return;
+      state.docker.busyKey = `stack:${name}:delete`;
+      renderMainView();
+      try {
+        const res = await apiFetch(`/stacks/${encodeURIComponent(name)}?volumes=${removeVolumes ? '1' : '0'}`, { method: 'DELETE' });
+        state.docker.stackOutput = {
+          stack: res.stack || name,
+          action: 'delete',
+          text: res.output || 'Đã xóa stack',
+          success: true
+        };
+        showToast(`Đã xóa stack "${name}"`, 'success');
+        await Promise.all([refreshOverview(), refreshStacks({ silent: true, skipRender: true }), refreshVolumes({ silent: true, skipRender: true })]);
+        renderHeader();
+      } catch (err) {
+        showToast(err.message || `Không thể xóa stack ${name}`, 'error');
+      } finally {
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    async function refreshRegistries(opts = {}) {
+      if (!canUseBackend()) return [];
+      state.docker.loadingRegistries = true;
+      try {
+        const res = await apiFetch('/registries');
+        state.docker.registries = Array.isArray(res.registries) ? res.registries : [];
+        return state.docker.registries;
+      } catch (err) {
+        if (!opts.silent) showToast(err.message || 'Không thể tải danh sách Registries', 'error');
+        return [];
+      } finally {
+        state.docker.loadingRegistries = false;
+        if (!opts.skipRender && (state.activeTab === 'docker' || (state.modal.open && state.modal.type === 'runContainer'))) {
+          renderMainView();
+        }
+      }
+    }
+
+    async function submitSaveRegistry(e) {
+      if (e) e.preventDefault();
+      if (!canUseBackend()) return;
+      const r = state.docker.newRegistry;
+      if (!String(r.server || '').trim() || !String(r.username || '').trim() || !String(r.password || '').trim()) {
+        showToast('Vui lòng nhập đầy đủ Server, Username và Password / Token', 'warn');
+        return;
+      }
+      state.docker.busyKey = 'save-registry';
+      renderMainView();
+      try {
+        await apiFetch('/registries', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: String(r.name || '').trim() || String(r.server || '').trim(),
+            server: String(r.server || '').trim(),
+            username: String(r.username || '').trim(),
+            password: r.password
+          })
+        });
+        state.docker.newRegistry = { name: '', server: 'ghcr.io', username: '', password: '' };
+        showToast('Đã lưu Private Registry (mã hóa AES-256-GCM Vault)!', 'success');
+        await refreshRegistries({ silent: true, skipRender: true });
+      } catch (err) {
+        showToast(err.message || 'Không thể lưu registry', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    async function removeRegistry(id, name) {
+      if (!canUseBackend()) return;
+      if (!confirm(`Xóa thông tin đăng nhập registry "${name || id}"?`)) return;
+      state.docker.busyKey = `del-reg:${id}`;
+      renderMainView();
+      try {
+        await apiFetch(`/registries/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        showToast(`Đã xóa registry "${name || id}"`, 'success');
+        await refreshRegistries({ silent: true, skipRender: true });
+      } catch (err) {
+        showToast(err.message || 'Không thể xóa registry', 'error');
+      } finally {
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    async function submitPullImage(e) {
+      if (e) e.preventDefault();
+      if (!canUseBackend()) return;
+      const pf = state.docker.pullForm;
+      const img = String(pf.image || '').trim();
+      if (!img) {
+        showToast('Nhập tên image cần pull (vd: nginx:alpine)', 'warn');
+        return;
+      }
+      pf.pulling = true;
+      pf.output = [`Đang pull ${img}...`];
+      state.docker.busyKey = 'pull-image';
+      renderMainView();
+      try {
+        const res = await apiFetch('/images/pull', {
+          method: 'POST',
+          body: JSON.stringify({ image: img, registryId: pf.registryId || '' })
+        });
+        pf.output = Array.isArray(res.lines) && res.lines.length ? res.lines : [res.status || `Pulled ${img}`];
+        pf.image = '';
+        showToast(res.status || `Đã pull image ${img} thành công!`, 'success');
+        await Promise.all([refreshOverview(), refreshDockerDiskUsage({ silent: true, skipRender: true })]);
+        renderHeader();
+      } catch (err) {
+        pf.output = [err.message || 'Pull image thất bại'];
+        showToast(err.message || 'Pull image thất bại', 'error');
+      } finally {
+        pf.pulling = false;
+        state.docker.busyKey = '';
+        renderMainView();
+      }
+    }
+
+    function openRunContainerModal() {
+      stopModalLogStream();
+      closeTerminalSession();
+      state.mah.settingsOpen = false;
+      state.mah.registerAgentOpen = false;
+      state.docker.runForm = {
+        name: '',
+        image: '',
+        registryId: '',
+        cmd: '',
+        portsText: '',
+        envText: '',
+        volumesText: '',
+        network: '',
+        restartPolicy: 'unless-stopped',
+        memoryMb: '',
+        cpuCores: '',
+        domain: '',
+        containerPort: '',
+        enableSsl: true,
+        forceHttps: false,
+        submitting: false,
+        error: ''
+      };
+      state.modal = { open: true, type: 'runContainer', targetKind: 'container', targetId: '', logFilter: '', sslForm: state.modal.sslForm };
+      renderModal();
+      if (canUseBackend()) {
+        if (!(state.docker.networks || []).length) refreshNetworks({ silent: true, skipRender: true }).then(() => { if (state.modal.open && state.modal.type === 'runContainer') renderModal(); });
+        if (!(state.docker.registries || []).length) refreshRegistries({ silent: true, skipRender: true }).then(() => { if (state.modal.open && state.modal.type === 'runContainer') renderModal(); });
+      }
+    }
+
+    async function submitRunCustomContainer(e) {
+      if (e) e.preventDefault();
+      if (!canUseBackend()) return;
+      const rf = state.docker.runForm;
+      if (!String(rf.image || '').trim()) {
+        rf.error = 'Vui lòng nhập Docker Image (vd: nginx:alpine)';
+        renderModal();
+        return;
+      }
+      rf.submitting = true;
+      rf.error = '';
+      renderModal();
+      const splitLines = (txt) => String(txt || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const ports = String(rf.portsText || '').split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+      try {
+        const created = await apiFetch('/containers/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: String(rf.name || '').trim(),
+            image: String(rf.image || '').trim(),
+            registryId: rf.registryId || '',
+            cmd: String(rf.cmd || '').trim(),
+            ports,
+            env: splitLines(rf.envText),
+            volumes: splitLines(rf.volumesText),
+            network: String(rf.network || '').trim(),
+            restartPolicy: rf.restartPolicy || 'unless-stopped',
+            memoryMb: Number(rf.memoryMb) || 0,
+            cpuCores: Number(rf.cpuCores) || 0,
+            domain: String(rf.domain || '').trim(),
+            containerPort: String(rf.containerPort || '').trim(),
+            enableSsl: Boolean(rf.enableSsl),
+            forceHttps: Boolean(rf.forceHttps)
+          })
+        });
+        showToast(`Đã khởi chạy container "${created.name || rf.name || rf.image}"!`, 'success');
+        closeModal();
+        await Promise.all([refreshOverview(), refreshDockerDiskUsage({ silent: true, skipRender: true })]);
+        renderHeader();
+        renderMainView();
+      } catch (err) {
+        rf.error = err && err.message ? err.message : 'Không thể tạo/chạy container';
+        renderModal();
+      } finally {
+        rf.submitting = false;
+      }
+    }
+
+    function stripAnsiCodes(str) {
+      return String(str || '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '');
+    }
+
+    function appendFallbackTerminalText(chunk) {
+      const t = state.docker.terminal;
+      t.fallbackBuffer = (t.fallbackBuffer + stripAnsiCodes(chunk)).slice(-16000);
+      const pre = document.getElementById('dockerFallbackTermPre');
+      if (pre) {
+        pre.textContent = t.fallbackBuffer || '[Đã kết nối shell...]';
+        pre.scrollTop = pre.scrollHeight;
+      }
+    }
+
+    function sendFallbackTerminalCommand(e) {
+      if (e) e.preventDefault();
+      const t = state.docker.terminal;
+      if (!t.ws || t.ws.readyState !== 1) return;
+      const val = String(t.fallbackInput || '');
+      t.ws.send(val + '\n');
+      t.fallbackInput = '';
+      const inp = document.getElementById('dockerFallbackCmdInput');
+      if (inp) inp.value = '';
+    }
+
+    function closeTerminalSession() {
+      const t = state.docker && state.docker.terminal;
+      if (!t) return;
+      if (t.resizeHandler && typeof window !== 'undefined') {
+        try { window.removeEventListener('resize', t.resizeHandler); } catch {}
+        t.resizeHandler = null;
+      }
+      if (t.ws) {
+        try { t.ws.onopen = t.ws.onmessage = t.ws.onerror = t.ws.onclose = null; t.ws.close(); } catch {}
+        t.ws = null;
+      }
+      if (t.term) {
+        try { t.term.dispose(); } catch {}
+        t.term = null;
+      }
+      t.fitAddon = null;
+      t.connected = false;
+      t.connecting = false;
+    }
+
+    function openTerminalModal(containerId, shellOverride) {
+      const cnt = state.containers.find(c => c.id === containerId);
+      if (!cnt) return;
+      stopModalLogStream();
+      closeTerminalSession();
+      state.mah.settingsOpen = false;
+      state.mah.registerAgentOpen = false;
+      state.docker.terminal = {
+        containerId: cnt.id,
+        containerName: cnt.name,
+        shell: shellOverride || state.docker.terminal.shell || 'auto',
+        ws: null,
+        term: null,
+        fitAddon: null,
+        resizeHandler: null,
+        connected: false,
+        connecting: true,
+        error: '',
+        fallbackBuffer: '',
+        fallbackInput: ''
+      };
+      state.modal = { open: true, type: 'terminal', targetKind: 'container', targetId: cnt.id, logFilter: '', sslForm: state.modal.sslForm };
+      renderModal();
+      if (typeof setTimeout === 'function') {
+        setTimeout(() => mountAndConnectTerminal(), 20);
+      }
+    }
+
+    function updateTerminalBadgeDom() {
+      const t = state.docker.terminal;
+      const badge = document.getElementById('dockerTerminalLiveBadge');
+      if (badge) {
+        badge.textContent = t.connected ? '● Live TTY WS' : (t.connecting ? '○ Connecting...' : '× Disconnected');
+        badge.className = `text-[11px] px-2 py-0.5 rounded-full border font-mono shrink-0 ${t.connected ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : (t.connecting ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'bg-rose-500/15 text-rose-400 border-rose-500/30')}`;
+      }
+    }
+
+    async function mountAndConnectTerminal() {
+      const t = state.docker.terminal;
+      const targetId = t.containerId;
+      if (!state.modal.open || state.modal.type !== 'terminal' || !targetId) return;
+      if (!canUseBackend()) {
+        t.connecting = false;
+        t.error = 'Interactive Web Terminal cần kết nối live backend Docker Engine.';
+        renderModal();
+        return;
+      }
+
+      closeTerminalSession();
+      t.connecting = true;
+      t.error = '';
+      updateTerminalBadgeDom();
+
+      let useXterm = false;
+      try {
+        await Promise.all([
+          loadCssOnce('https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css'),
+          loadScriptOnce('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js'),
+          loadScriptOnce('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js')
+        ]);
+        useXterm = typeof window !== 'undefined' && typeof window.Terminal === 'function';
+      } catch {
+        useXterm = false;
+      }
+
+      if (!state.modal.open || state.modal.type !== 'terminal' || state.docker.terminal.containerId !== targetId) return;
+
+      const host = typeof document !== 'undefined' ? document.getElementById('dockerXtermHost') : null;
+      const fbBox = typeof document !== 'undefined' ? document.getElementById('dockerFallbackTermWrap') : null;
+      let cols = 96;
+      let rows = 26;
+
+      if (useXterm && host) {
+        host.innerHTML = '';
+        if (fbBox) fbBox.classList.add('hidden');
+        host.classList.remove('hidden');
+        const term = new window.Terminal({
+          cursorBlink: true,
+          convertEol: false,
+          fontSize: 13,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+          theme: { background: '#090d16', foreground: '#e2e8f0', cursor: '#38bdf8' }
+        });
+        let fitAddon = null;
+        if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+          fitAddon = new window.FitAddon.FitAddon();
+          term.loadAddon(fitAddon);
+        }
+        term.open(host);
+        if (fitAddon) {
+          try { fitAddon.fit(); } catch {}
+        }
+        cols = term.cols || 96;
+        rows = term.rows || 26;
+        t.term = term;
+        t.fitAddon = fitAddon;
+        try { term.focus(); } catch {}
+      } else {
+        if (host) host.classList.add('hidden');
+        if (fbBox) fbBox.classList.remove('hidden');
+      }
+
+      if (typeof WebSocket === 'undefined' || typeof window === 'undefined') {
+        t.connecting = false;
+        t.error = 'Trình duyệt không hỗ trợ WebSocket.';
+        updateTerminalBadgeDom();
+        return;
+      }
+
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${window.location.host}/api/v1/containers/${encodeURIComponent(targetId)}/exec/ws?shell=${encodeURIComponent(t.shell || 'auto')}&cols=${cols}&rows=${rows}`;
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+      t.ws = ws;
+
+      ws.onopen = () => {
+        t.connecting = false;
+        t.connected = true;
+        t.error = '';
+        updateTerminalBadgeDom();
+        if (t.term) {
+          t.term.onData((data) => {
+            if (ws.readyState === 1) ws.send(data);
+          });
+          t.term.onResize((sz) => {
+            if (ws.readyState === 1 && sz && sz.cols > 0 && sz.rows > 0) {
+              ws.send(JSON.stringify({ type: 'resize', cols: sz.cols, rows: sz.rows }));
+            }
+          });
+          t.resizeHandler = () => {
+            if (t.fitAddon) {
+              try { t.fitAddon.fit(); } catch {}
+            }
+          };
+          window.addEventListener('resize', t.resizeHandler);
+        } else {
+          appendFallbackTerminalText(`[Connected to ${t.containerName} via ${t.shell}]\n`);
+        }
+      };
+
+      const dec = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
+      ws.onmessage = async (ev) => {
+        let chunk = '';
+        if (typeof ev.data === 'string') {
+          chunk = ev.data;
+        } else if (ev.data instanceof ArrayBuffer) {
+          chunk = dec ? dec.decode(new Uint8Array(ev.data)) : '';
+        } else if (typeof Blob !== 'undefined' && ev.data instanceof Blob) {
+          const ab = await ev.data.arrayBuffer();
+          chunk = dec ? dec.decode(new Uint8Array(ab)) : '';
+        }
+        if (!chunk) return;
+        if (t.term) t.term.write(chunk);
+        else appendFallbackTerminalText(chunk);
+      };
+
+      ws.onerror = () => {
+        t.connecting = false;
+        t.connected = false;
+        t.error = 'Lỗi kết nối WebSocket terminal (kiểm tra container đang Running và hỗ trợ sh/bash).';
+        updateTerminalBadgeDom();
+      };
+
+      ws.onclose = () => {
+        t.connecting = false;
+        t.connected = false;
+        updateTerminalBadgeDom();
+        if (t.term) t.term.write('\r\n\x1b[33m[Phiên terminal đã đóng]\x1b[0m\r\n');
+        else appendFallbackTerminalText('\n[Phiên terminal đã đóng]\n');
+      };
+    }
+
     async function refreshDockerTabData(opts = {}) {
       if (!canUseBackend()) return;
       const tasks = [refreshDockerDiskUsage({ silent: true, skipRender: true })];
       if (state.dockerSubTab === 'containers') tasks.push(refreshAllContainerStats({ silent: true, skipRender: true }));
+      else if (state.dockerSubTab === 'images') tasks.push(refreshRegistries({ silent: true, skipRender: true }));
+      else if (state.dockerSubTab === 'stacks') {
+        tasks.push(refreshStacks({ silent: true, skipRender: true }));
+        tasks.push(refreshStackTemplates({ silent: true, skipRender: true }));
+      }
       else if (state.dockerSubTab === 'volumes') tasks.push(refreshVolumes({ silent: true, skipRender: true }));
       else if (state.dockerSubTab === 'networks') tasks.push(refreshNetworks({ silent: true, skipRender: true }));
       else if (state.dockerSubTab === 'events') tasks.push(refreshDockerEvents({ silent: true, skipRender: true }));
@@ -4691,12 +5355,137 @@ volumes:
       `;
     }
 
+    function renderStacksSection(isMob) {
+      const stacks = state.docker.stacks || [];
+      const templates = state.docker.templates || [];
+      const ed = state.docker.stackEditor || {};
+      const out = state.docker.stackOutput || {};
+      const busy = state.docker && state.docker.busyKey;
+      const entries = Array.isArray(ed.envEntries) ? ed.envEntries : [];
+
+      return `
+        <div class="space-y-4">
+          <!-- 1-Click Service / DB Templates -->
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 class="text-xs font-semibold text-[var(--foreground)]">1-Click Database &amp; Infra Templates</h2>
+                <p class="text-[11px] text-[var(--muted-foreground)]">Tự động sinh mật khẩu CSPRNG, gắn persistent volume &amp; bind 127.0.0.1 an toàn. Chọn để nạp vào Compose Editor.</p>
+              </div>
+              <button type="button" onclick="refreshStackTemplates({silent:false})" class="px-2.5 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium hover:bg-[var(--accent)]">↻ Tải Templates</button>
+            </div>
+            <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2 lg:grid-cols-3'} gap-2.5">
+              ${templates.length === 0 ? `
+                <div class="col-span-full rounded-xl border border-dashed border-[var(--border)] bg-[var(--content)] p-5 text-center text-xs text-[var(--muted-foreground)]">
+                  Đang tải 1-Click DB Templates hoặc chưa kết nối backend...
+                </div>
+              ` : templates.map(tpl => `
+                <div class="rounded-xl border border-[var(--border)] bg-[var(--content)] p-3 flex flex-col justify-between gap-2 hover:border-indigo-500/40 transition">
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-xs font-semibold text-[var(--foreground)]">${esc(tpl.name)}</span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-mono">${esc(tpl.category)}</span>
+                    </div>
+                    <div class="text-[11px] text-[var(--muted-foreground)]">${esc(tpl.description)}</div>
+                    <div class="text-[10px] font-mono text-sky-400">Ports: ${esc(tpl.ports)}</div>
+                  </div>
+                  <button type="button" onclick="applyStackTemplate('${esc(tpl.key)}')" class="w-full py-1.5 rounded-lg bg-gradient-to-r from-indigo-500/20 to-sky-500/20 hover:from-indigo-500/30 hover:to-sky-500/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition">
+                    Nạp Template →
+                  </button>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+
+          <!-- Deploy / Edit Compose Stack -->
+          <form onsubmit="submitDeployStack(event)" class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="text-xs font-semibold text-[var(--foreground)]">
+                ${ed.editingExisting ? `Chỉnh sửa Compose Stack: <span class="font-mono text-indigo-400">${esc(ed.name)}</span>` : 'Deploy Docker Compose Stack Mới'}
+              </div>
+              <button type="button" onclick="resetStackEditor()" class="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]">Làm mới Form</button>
+            </div>
+            <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2'} gap-3">
+              <div class="space-y-2">
+                <label class="block text-[11px] font-medium text-[var(--muted-foreground)]">Tên Stack (a-z, 0-9, -, _)</label>
+                <input id="dockerStackNameInput" type="text" required ${ed.editingExisting ? 'readonly' : ''} value="${esc(ed.name || '')}" oninput="state.docker.stackEditor.name = this.value" placeholder="vd: postgres-db, my-stack" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                <label class="block text-[11px] font-medium text-[var(--muted-foreground)]">docker-compose.yml</label>
+                <textarea id="dockerStackComposeInput" rows="10" required oninput="state.docker.stackEditor.composeYaml = this.value" placeholder="services:\n  app:\n    image: nginx:alpine\n    ports:\n      - &quot;127.0.0.1:8085:80&quot;" class="w-full px-3 py-2 rounded-xl bg-[var(--sidebar)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)] leading-relaxed">${esc(ed.composeYaml || '')}</textarea>
+              </div>
+              <div class="space-y-2 flex flex-col">
+                <div class="flex items-center justify-between">
+                  <label class="block text-[11px] font-medium text-[var(--muted-foreground)]">Biến môi trường (.env — mã hóa Vault AES-256-GCM)</label>
+                  ${ed.editingExisting && entries.length ? `<span class="text-[10px] font-mono text-amber-400">Giữ "••••••••" để bảo toàn secret cũ</span>` : ''}
+                </div>
+                <textarea id="dockerStackEnvInput" rows="12" oninput="state.docker.stackEditor.envText = this.value" placeholder="POSTGRES_USER=appuser&#10;POSTGRES_PASSWORD=secret..." class="flex-1 w-full px-3 py-2 rounded-xl bg-[var(--sidebar)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)] leading-relaxed">${esc(ed.envText || '')}</textarea>
+                <div class="flex items-center justify-end gap-2 pt-1">
+                  <button type="submit" ${ed.saving || busy ? 'disabled' : ''} class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-60">
+                    ${ed.saving ? 'Đang chạy docker compose up -d...' : '▲ Deploy Stack (Compose Up -d)'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </form>
+
+          <!-- Active Stacks -->
+          <div class="space-y-2.5">
+            <div class="flex items-center justify-between">
+              <h2 class="text-xs font-semibold text-[var(--foreground)]">Compose Stacks đang quản lý (${stacks.length})</h2>
+              <button type="button" onclick="refreshStacks({silent:false})" class="text-xs text-indigo-400 hover:underline">↻ Tải lại Stacks</button>
+            </div>
+            ${stacks.length === 0 ? `
+              <div class="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center text-xs text-[var(--muted-foreground)]">
+                ${state.docker.loadingStacks ? 'Đang quét Docker Compose stacks...' : 'Chưa có Compose Stack nào. Hãy chọn 1-Click DB Template hoặc dán docker-compose.yml ở trên.'}
+              </div>
+            ` : stacks.map(st => {
+              const isProt = Boolean(st.protected);
+              const isRun = st.status === 'Running';
+              return `
+                <div class="rounded-2xl border ${isProt ? 'border-indigo-500/35 bg-indigo-500/5' : 'border-[var(--border)] bg-[var(--card)]'} p-3.5 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+                  <div class="space-y-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="text-xs font-mono font-semibold text-[var(--foreground)]">${esc(st.name)}</span>
+                      <span class="text-[10px] px-2 py-0.5 rounded-full border font-semibold ${isRun ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : (st.running > 0 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'bg-[var(--content)] text-[var(--muted-foreground)] border-[var(--border)]')}">${esc(st.status)} (${st.running}/${st.services})</span>
+                      ${st.managed ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/30 font-mono">Managed</span>' : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-[var(--content)] text-[var(--muted-foreground)] border border-[var(--border)] font-mono">External</span>'}
+                      ${st.hasEnv ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 font-mono">Vault .env</span>' : ''}
+                      ${isProt ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold">🛡️ System</span>' : ''}
+                    </div>
+                    <div class="text-[11px] font-mono text-[var(--muted-foreground)] truncate">Containers: ${esc((st.containers || []).join(', ') || '-')}</div>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    ${st.managed && !isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="runStackAction('${esc(st.name)}', 'up')" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-medium">Up</button>` : ''}
+                    ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="runStackAction('${esc(st.name)}', '${isRun ? 'stop' : 'start'}')" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">${isRun ? 'Stop' : 'Start'}</button>` : ''}
+                    ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="runStackAction('${esc(st.name)}', 'restart')" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">Restart</button>` : ''}
+                    ${st.managed && !isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="runStackAction('${esc(st.name)}', 'pull')" class="px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-400 border border-sky-500/30 text-xs font-medium">Pull</button>` : ''}
+                    ${st.managed ? `<button type="button" ${busy ? 'disabled' : ''} onclick="runStackAction('${esc(st.name)}', 'logs')" class="px-2.5 py-1 rounded-lg bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] text-xs font-medium">Logs</button>` : ''}
+                    ${st.managed && !isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="loadStackForEdit('${esc(st.name)}')" class="px-2.5 py-1 rounded-lg bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 text-xs font-medium">Edit</button>` : ''}
+                    ${st.managed && !isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="removeStack('${esc(st.name)}', false)" class="px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-400 border border-rose-500/30 text-xs font-medium">Xóa</button>` : ''}
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+
+          ${out.text ? `
+            <div class="rounded-2xl border ${out.success ? 'border-emerald-500/30' : 'border-rose-500/35'} bg-[var(--sidebar)] overflow-hidden shadow-sm">
+              <div class="px-3.5 py-2 border-b border-[var(--border)] flex items-center justify-between text-xs font-mono">
+                <span class="${out.success ? 'text-emerald-400' : 'text-rose-400'}">docker compose [${esc(out.stack)} • ${esc(out.action)}]</span>
+                <button type="button" onclick="state.docker.stackOutput={stack:'',action:'',text:'',success:true}; renderMainView();" class="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">Đóng Log</button>
+              </div>
+              <pre class="p-3.5 text-[11px] font-mono text-[var(--foreground)] max-h-64 overflow-y-auto thin-scroll whitespace-pre-wrap break-all">${esc(out.text)}</pre>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
     function renderDocker(container) {
       const isMob = state.viewport === 'mobile';
       const danglingList = state.images.filter(i => i.dangling);
       const reclaimableMb = danglingList.reduce((acc, i) => acc + i.sizeMb, 0);
       const subTabs = [
         { k: 'containers', label: `Containers (${state.containers.length})` },
+        { k: 'stacks', label: `Stacks (${(state.docker.stacks || []).length})` },
         { k: 'images', label: `Images & Cache (${state.images.length})` },
         { k: 'volumes', label: `Volumes (${(state.docker.volumes || []).length})` },
         { k: 'networks', label: `Networks (${(state.docker.networks || []).length})` },
@@ -4704,7 +5493,8 @@ volumes:
       ];
 
       let bodyHtml = '';
-      if (state.dockerSubTab === 'images') bodyHtml = renderImagesSection(isMob, danglingList, reclaimableMb);
+      if (state.dockerSubTab === 'stacks') bodyHtml = renderStacksSection(isMob);
+      else if (state.dockerSubTab === 'images') bodyHtml = renderImagesSection(isMob, danglingList, reclaimableMb);
       else if (state.dockerSubTab === 'volumes') bodyHtml = renderVolumesSection(isMob);
       else if (state.dockerSubTab === 'networks') bodyHtml = renderNetworksSection(isMob);
       else if (state.dockerSubTab === 'events') bodyHtml = renderLiveEventsSection();
@@ -4717,7 +5507,7 @@ volumes:
               <span class="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-500 flex items-center justify-center shrink-0">${dockerIconSvg('w-5 h-5')}</span>
               <div>
                 <h1 class="text-base font-semibold text-[var(--foreground)]">Quản lý Docker Runtime</h1>
-                <p class="text-xs text-[var(--muted-foreground)]">Containers, Images &amp; Cache, Volumes + Backup, Networks &amp; Realtime Events SSE.</p>
+                <p class="text-xs text-[var(--muted-foreground)]">Containers, Compose Stacks &amp; 1-Click DB, Images &amp; Registries, Volumes, Networks &amp; Live Shell.</p>
               </div>
             </div>
 
@@ -4734,23 +5524,50 @@ volumes:
       `;
     }
 
-    function renderContainersSection(isMob) {
+    function renderContainerActionButtonsHtml(c, isMob) {
       const busy = state.docker && state.docker.busyKey;
+      const isRunning = c.status === 'Running';
+      const isPaused = c.status === 'Paused';
+      const isProt = isProtectedContainer(c);
+      const clsPad = isMob ? 'px-2.5 py-1.5 rounded-xl' : 'px-2 py-1 rounded-lg';
+      return `
+        ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="toggleContainerPower('${esc(c.id)}')" class="${clsPad} text-xs font-medium ${isRunning ? 'bg-rose-500/15 text-rose-500 border border-rose-500/30 hover:bg-rose-500/25' : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 hover:bg-emerald-500/25'}">${isRunning ? 'Stop' : 'Start'}</button>` : ''}
+        ${!isProt && (isRunning || isPaused) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="containerAction('${esc(c.id)}', '${isPaused ? 'unpause' : 'pause'}')" class="${clsPad} text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25">${isPaused ? 'Unpause' : 'Pause'}</button>` : ''}
+        ${!isProt || canRestartProtectedContainer(c) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="restartContainer('${esc(c.id)}')" class="${clsPad} text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Restart</button>` : ''}
+        ${canExecContainer(c) ? `<button type="button" onclick="openTerminalModal('${esc(c.id)}')" class="${clsPad} text-xs font-mono font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/35 hover:bg-emerald-500/25">&gt;_ Shell</button>` : ''}
+        <button type="button" onclick="openInspectModal('${esc(c.id)}')" class="${clsPad} text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/25">Inspect</button>
+        <button type="button" onclick="openLogsModal('container', '${esc(c.id)}')" class="${clsPad} text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Logs</button>
+        ${!isProt ? `<button type="button" onclick="openRollbackModal('${esc(c.id)}')" class="${clsPad} text-xs font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/25">Rollback</button>` : ''}
+        ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="confirmRemoveContainer('${esc(c.id)}')" class="${clsPad} text-xs font-medium bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25">Xóa</button>` : ''}
+      `;
+    }
+
+    function renderContainersSection(isMob) {
+      const topBar = `
+        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] px-4 py-3 flex flex-wrap items-center justify-between gap-2 shadow-sm">
+          <div class="text-xs text-[var(--muted-foreground)]">
+            Hiển thị <strong class="text-[var(--foreground)]">${state.containers.length}</strong> container • Mở <span class="font-mono text-emerald-400">&gt;_ Shell</span> trực tiếp hoặc chạy custom container mới.
+          </div>
+          <button type="button" onclick="openRunContainerModal()" class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm">
+            + Run Custom Container
+          </button>
+        </div>
+      `;
+
       if (isMob) {
         if (!state.containers.length) {
-          return `
-            <div class="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center text-xs text-[var(--muted-foreground)]">
+          return `${topBar}
+            <div class="mt-3 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)] p-8 text-center text-xs text-[var(--muted-foreground)]">
               Chưa có container nào đang chạy. Các container sẽ xuất hiện khi bạn triển khai project.
             </div>
           `;
         }
         return `
           <div class="space-y-2.5">
+            ${topBar}
             ${state.containers.map(c => {
               const lim = Math.max(1, c.ramLimitMb || 512);
               const ramPct = Math.min(100, Math.round((c.ramMb / lim) * 100));
-              const isRunning = c.status === 'Running';
-              const isPaused = c.status === 'Paused';
               const isProt = isProtectedContainer(c);
               const live = state.docker?.liveStats?.[c.id];
               return `
@@ -4787,13 +5604,7 @@ volumes:
                   <div class="text-xs font-mono text-[var(--muted-foreground)] truncate">Ports: ${esc(c.ports)}</div>
 
                   <div class="flex flex-wrap gap-1.5 pt-1">
-                    ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="toggleContainerPower('${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium ${isRunning ? 'bg-rose-500/15 text-rose-500 border border-rose-500/30' : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'}">${isRunning ? 'Stop' : 'Start'}</button>` : ''}
-                    ${!isProt && (isRunning || isPaused) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="containerAction('${esc(c.id)}', '${isPaused ? 'unpause' : 'pause'}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">${isPaused ? 'Unpause' : 'Pause'}</button>` : ''}
-                    ${!isProt || canRestartProtectedContainer(c) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="restartContainer('${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)]">Restart</button>` : ''}
-                    <button type="button" onclick="openInspectModal('${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">Inspect</button>
-                    <button type="button" onclick="openLogsModal('container', '${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)]">Logs</button>
-                    ${!isProt ? `<button type="button" onclick="openRollbackModal('${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30">Rollback</button>` : ''}
-                    ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="confirmRemoveContainer('${esc(c.id)}')" class="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-rose-500/15 text-rose-400 border border-rose-500/30">Xóa</button>` : ''}
+                    ${renderContainerActionButtonsHtml(c, true)}
                   </div>
                 </div>
               `;
@@ -4803,78 +5614,73 @@ volumes:
       }
 
       return `
-        <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
-          <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse">
-              <thead>
-                <tr class="border-b border-[var(--border)] bg-[var(--sidebar)] text-xs text-[var(--muted-foreground)]">
-                  <th class="py-3 px-4 font-semibold">Container / Image</th>
-                  <th class="py-3 px-3 font-semibold">Trạng thái</th>
-                  <th class="py-3 px-3 font-semibold">CPU</th>
-                  <th class="py-3 px-3 font-semibold">RAM</th>
-                  <th class="py-3 px-3 font-semibold">Ports</th>
-                  <th class="py-3 px-4 font-semibold text-right">Hành động</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-[var(--border)] text-xs">
-                ${state.containers.length === 0 ? `
-                  <tr>
-                    <td colspan="6" class="py-12 text-center text-xs text-[var(--muted-foreground)]">
-                      Chưa có container nào đang chạy. Hãy bắt đầu deploy ứng dụng từ tab Deploy.
-                    </td>
+        <div class="space-y-3">
+          ${topBar}
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-[var(--border)] bg-[var(--sidebar)] text-xs text-[var(--muted-foreground)]">
+                    <th class="py-3 px-4 font-semibold">Container / Image</th>
+                    <th class="py-3 px-3 font-semibold">Trạng thái</th>
+                    <th class="py-3 px-3 font-semibold">CPU</th>
+                    <th class="py-3 px-3 font-semibold">RAM</th>
+                    <th class="py-3 px-3 font-semibold">Ports</th>
+                    <th class="py-3 px-4 font-semibold text-right">Hành động</th>
                   </tr>
-                ` : state.containers.map(c => {
-                  const isRunning = c.status === 'Running';
-                  const isPaused = c.status === 'Paused';
-                  const isProt = isProtectedContainer(c);
-                  const live = state.docker?.liveStats?.[c.id];
-                  const lim = Math.max(1, c.ramLimitMb || (live && live.memoryLimitMb) || 512);
-                  const ramVal = live ? Math.round(live.memoryUsedMb) : c.ramMb;
-                  const ramPct = Math.min(100, Math.round((ramVal / lim) * 100));
-                  return `
-                    <tr class="hover:bg-[var(--content)]/60 transition ${isProt ? 'bg-indigo-500/[0.03]' : ''}">
-                      <td class="py-3 px-4">
-                        <div class="flex items-center gap-2.5">
-                          ${stackIconHtml(c.stackKey || 'nextjs', 'sm')}
-                          <div>
-                            <div class="flex items-center gap-1.5">
-                              <span class="font-semibold font-mono text-[var(--foreground)]">${esc(c.name)}</span>
-                              ${isProt ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold">🛡️ System</span>' : ''}
-                            </div>
-                            <div class="text-xs font-mono text-[var(--muted-foreground)]">${esc(c.image)} • ${esc(c.uptime)}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td class="py-3 px-3">${statusBadgeHtml(c.status)}</td>
-                      <td class="py-3 px-3 w-28">
-                        <div class="flex justify-between font-mono text-xs mb-1"><span>${c.cpuPct}%</span></div>
-                        <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
-                          <div class="h-full bg-sky-500 rounded-full" style="width:${Math.min(100, c.cpuPct * 3)}%"></div>
-                        </div>
-                      </td>
-                      <td class="py-3 px-3 w-36">
-                        <div class="flex justify-between font-mono text-xs mb-1"><span>${ramVal} / ${Math.round(lim)} MB</span></div>
-                        <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
-                          <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" style="width:${ramPct}%"></div>
-                        </div>
-                      </td>
-                      <td class="py-3 px-3 font-mono text-[var(--muted-foreground)] max-w-[190px] truncate" title="${esc(c.ports)}">${esc(c.ports)}</td>
-                      <td class="py-3 px-4 text-right">
-                        <div class="inline-flex flex-wrap items-center justify-end gap-1">
-                          ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="toggleContainerPower('${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium ${isRunning ? 'bg-rose-500/15 text-rose-500 border border-rose-500/30 hover:bg-rose-500/25' : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 hover:bg-emerald-500/25'}">${isRunning ? 'Stop' : 'Start'}</button>` : ''}
-                          ${!isProt && (isRunning || isPaused) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="containerAction('${esc(c.id)}', '${isPaused ? 'unpause' : 'pause'}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25">${isPaused ? 'Unpause' : 'Pause'}</button>` : ''}
-                          ${!isProt || canRestartProtectedContainer(c) ? `<button type="button" ${busy ? 'disabled' : ''} onclick="restartContainer('${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Restart</button>` : ''}
-                          <button type="button" onclick="openInspectModal('${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/25">Inspect</button>
-                          <button type="button" onclick="openLogsModal('container', '${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">Logs</button>
-                          ${!isProt ? `<button type="button" onclick="openRollbackModal('${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-amber-500/15 text-amber-500 border border-amber-500/30 hover:bg-amber-500/25">Rollback</button>` : ''}
-                          ${!isProt ? `<button type="button" ${busy ? 'disabled' : ''} onclick="confirmRemoveContainer('${esc(c.id)}')" class="px-2 py-1 rounded-lg text-xs font-medium bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25">Xóa</button>` : ''}
-                        </div>
+                </thead>
+                <tbody class="divide-y divide-[var(--border)] text-xs">
+                  ${state.containers.length === 0 ? `
+                    <tr>
+                      <td colspan="6" class="py-12 text-center text-xs text-[var(--muted-foreground)]">
+                        Chưa có container nào đang chạy. Hãy bắt đầu deploy ứng dụng từ tab Deploy.
                       </td>
                     </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
+                  ` : state.containers.map(c => {
+                    const isProt = isProtectedContainer(c);
+                    const live = state.docker?.liveStats?.[c.id];
+                    const lim = Math.max(1, c.ramLimitMb || (live && live.memoryLimitMb) || 512);
+                    const ramVal = live ? Math.round(live.memoryUsedMb) : c.ramMb;
+                    const ramPct = Math.min(100, Math.round((ramVal / lim) * 100));
+                    return `
+                      <tr class="hover:bg-[var(--content)]/60 transition ${isProt ? 'bg-indigo-500/[0.03]' : ''}">
+                        <td class="py-3 px-4">
+                          <div class="flex items-center gap-2.5">
+                            ${stackIconHtml(c.stackKey || 'nextjs', 'sm')}
+                            <div>
+                              <div class="flex items-center gap-1.5">
+                                <span class="font-semibold font-mono text-[var(--foreground)]">${esc(c.name)}</span>
+                                ${isProt ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 font-semibold">🛡️ System</span>' : ''}
+                              </div>
+                              <div class="text-xs font-mono text-[var(--muted-foreground)]">${esc(c.image)} • ${esc(c.uptime)}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td class="py-3 px-3">${statusBadgeHtml(c.status)}</td>
+                        <td class="py-3 px-3 w-28">
+                          <div class="flex justify-between font-mono text-xs mb-1"><span>${c.cpuPct}%</span></div>
+                          <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                            <div class="h-full bg-sky-500 rounded-full" style="width:${Math.min(100, c.cpuPct * 3)}%"></div>
+                          </div>
+                        </td>
+                        <td class="py-3 px-3 w-36">
+                          <div class="flex justify-between font-mono text-xs mb-1"><span>${ramVal} / ${Math.round(lim)} MB</span></div>
+                          <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
+                            <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" style="width:${ramPct}%"></div>
+                          </div>
+                        </td>
+                        <td class="py-3 px-3 font-mono text-[var(--muted-foreground)] max-w-[190px] truncate" title="${esc(c.ports)}">${esc(c.ports)}</td>
+                        <td class="py-3 px-4 text-right">
+                          <div class="inline-flex flex-wrap items-center justify-end gap-1">
+                            ${renderContainerActionButtonsHtml(c, false)}
+                          </div>
+                        </td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       `;
@@ -4884,6 +5690,9 @@ volumes:
       const totalMb = state.images.reduce((acc, i) => acc + i.sizeMb, 0);
       const unusedList = state.images.filter(i => !i.inUse);
       const busy = state.docker && state.docker.busyKey;
+      const regs = state.docker.registries || [];
+      const pf = state.docker.pullForm || {};
+      const nr = state.docker.newRegistry || {};
       return `
         <div class="space-y-3">
           <!-- Prune Summary Bar -->
@@ -4903,6 +5712,59 @@ volumes:
                 ${busy === 'prune-all' ? 'Đang dọn...' : 'Dọn tất cả Unused Images'}
               </button>
             </div>
+          </div>
+
+          <!-- Pull Image & Private Registries -->
+          <div class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3.5 space-y-3 shadow-sm">
+            <form onsubmit="submitPullImage(event)" class="flex flex-wrap items-center gap-2">
+              <input id="dockerPullImageInput" type="text" required value="${esc(pf.image || '')}" oninput="state.docker.pullForm.image = this.value" placeholder="Pull image (vd: nginx:alpine, ghcr.io/org/app:v1)..." class="flex-1 min-w-[200px] px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <select onchange="state.docker.pullForm.registryId = this.value" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono">
+                <option value="">Auto / Public Registry</option>
+                ${regs.map(r => `<option value="${esc(r.id)}" ${pf.registryId === r.id ? 'selected' : ''}>${esc(r.name)} (${esc(r.server)})</option>`).join('')}
+              </select>
+              <button type="submit" ${pf.pulling || busy ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-60">
+                ${pf.pulling ? 'Đang Pull...' : '↓ Pull Image'}
+              </button>
+              <button type="button" onclick="state.docker.showRegistries = !state.docker.showRegistries; renderMainView(); if(state.docker.showRegistries) refreshRegistries({silent:true});" class="px-3 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)]">
+                🔐 Registries (${regs.length})
+              </button>
+            </form>
+
+            ${(pf.output || []).length ? `
+              <div class="rounded-xl border border-[var(--border)] bg-[var(--sidebar)] p-2.5">
+                <div class="flex items-center justify-between text-[11px] font-mono text-[var(--muted-foreground)] mb-1">
+                  <span>Pull Output</span>
+                  <button type="button" onclick="state.docker.pullForm.output=[]; renderMainView();" class="hover:text-[var(--foreground)]">Ẩn</button>
+                </div>
+                <pre class="text-[11px] font-mono text-emerald-400 max-h-32 overflow-y-auto thin-scroll whitespace-pre-wrap">${esc((pf.output || []).join('\n'))}</pre>
+              </div>
+            ` : ''}
+
+            ${state.docker.showRegistries ? `
+              <div class="pt-3 border-t border-[var(--border)] space-y-2.5">
+                <div class="text-xs font-semibold text-[var(--foreground)]">Private Container Registries (Vault AES-256-GCM)</div>
+                <form onsubmit="submitSaveRegistry(event)" class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-5'} gap-2">
+                  <input type="text" value="${esc(nr.name || '')}" oninput="state.docker.newRegistry.name = this.value" placeholder="Tên (vd: GHCR)" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)]" />
+                  <input type="text" required value="${esc(nr.server || '')}" oninput="state.docker.newRegistry.server = this.value" placeholder="Server (ghcr.io)" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                  <input type="text" required value="${esc(nr.username || '')}" oninput="state.docker.newRegistry.username = this.value" placeholder="Username" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                  <input type="password" required value="${esc(nr.password || '')}" oninput="state.docker.newRegistry.password = this.value" placeholder="PAT / Password" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                  <button type="submit" ${busy ? 'disabled' : ''} class="px-3 py-1.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/35 text-xs font-semibold hover:bg-emerald-500/25">+ Lưu Registry</button>
+                </form>
+                <div class="space-y-1.5">
+                  ${regs.length === 0 ? '<div class="text-[11px] text-[var(--muted-foreground)]">Chưa lưu Private Registry nào (GHCR, DockerHub Private, Harbor...).</div>' : regs.map(r => `
+                    <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="font-semibold text-[var(--foreground)]">${esc(r.name)}</span>
+                        <span class="text-sky-400">${esc(r.server)}</span>
+                        <span class="text-[var(--muted-foreground)]">user: ${esc(r.username)}</span>
+                        <span class="text-[var(--muted-foreground)]">secret: ${esc(r.passwordPreview || '••••')}</span>
+                      </div>
+                      <button type="button" ${busy ? 'disabled' : ''} onclick="removeRegistry('${esc(r.id)}', '${esc(r.name)}')" class="text-rose-400 hover:underline">Xóa</button>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
           </div>
 
           <!-- Image Cards -->
@@ -6384,10 +7246,161 @@ volumes:
 
     function closeModal() {
       stopModalLogStream();
+      if (typeof closeTerminalSession === 'function') closeTerminalSession();
       state.modal.open = false;
       state.mah.settingsOpen = false;
       state.mah.registerAgentOpen = false;
       renderModal();
+    }
+
+    function renderRunContainerModalHtml(wrapperCls, isMob) {
+      const rf = state.docker.runForm || {};
+      const nets = state.docker.networks || [];
+      const regs = state.docker.registries || [];
+      return `
+        <div class="${wrapperCls}" onclick="if(event.target===this) closeModal()">
+          <form onsubmit="submitRunCustomContainer(event)" class="w-full ${isMob ? 'max-h-[90%]' : 'max-w-2xl max-h-[90vh]'} rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl flex flex-col overflow-hidden">
+            <div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--sidebar)] flex items-center justify-between">
+              <div>
+                <div class="text-xs font-semibold text-[var(--foreground)]">+ Run Custom Docker Container</div>
+                <div class="text-[11px] text-[var(--muted-foreground)]">Auto-pull image nếu chưa có local • Hỗ trợ Private Registry, Volumes, Resource Limits &amp; Auto-SSL Traefik.</div>
+              </div>
+              <button type="button" onclick="closeModal()" class="px-2.5 py-1 rounded-lg bg-[var(--content)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">Đóng</button>
+            </div>
+            <div class="p-4 overflow-y-auto thin-scroll space-y-3 text-xs">
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-3">
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Docker Image *</span>
+                  <input id="runContainerImageInput" type="text" required value="${esc(rf.image || '')}" oninput="state.docker.runForm.image = this.value" placeholder="vd: nginx:alpine, redis:7-alpine" class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Tên Container (tùy chọn)</span>
+                  <input id="runContainerNameInput" type="text" value="${esc(rf.name || '')}" oninput="state.docker.runForm.name = this.value" placeholder="Để trống = tự đặt dh-..." class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Private Registry</span>
+                  <select onchange="state.docker.runForm.registryId = this.value" class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]">
+                    <option value="">Auto / Public Registry</option>
+                    ${regs.map(r => `<option value="${esc(r.id)}" ${rf.registryId === r.id ? 'selected' : ''}>${esc(r.name)} (${esc(r.server)})</option>`).join('')}
+                  </select>
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Command Override (tùy chọn)</span>
+                  <input type="text" value="${esc(rf.cmd || '')}" oninput="state.docker.runForm.cmd = this.value" placeholder="vd: --appendonly yes" class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                </label>
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-3'} gap-3">
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Network</span>
+                  <select onchange="state.docker.runForm.network = this.value" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono">
+                    <option value="">bridge (mặc định)</option>
+                    ${nets.map(n => `<option value="${esc(n.name)}" ${rf.network === n.name ? 'selected' : ''}>${esc(n.name)} (${esc(n.driver || 'bridge')})</option>`).join('')}
+                  </select>
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Restart Policy</span>
+                  <select onchange="state.docker.runForm.restartPolicy = this.value" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono">
+                    <option value="unless-stopped" ${rf.restartPolicy === 'unless-stopped' ? 'selected' : ''}>unless-stopped</option>
+                    <option value="always" ${rf.restartPolicy === 'always' ? 'selected' : ''}>always</option>
+                    <option value="on-failure" ${rf.restartPolicy === 'on-failure' ? 'selected' : ''}>on-failure</option>
+                    <option value="no" ${rf.restartPolicy === 'no' ? 'selected' : ''}>no</option>
+                  </select>
+                </label>
+                <div class="grid grid-cols-2 gap-2">
+                  <label class="block space-y-1">
+                    <span class="text-[11px] text-[var(--muted-foreground)]">RAM (MB)</span>
+                    <input type="number" min="0" value="${esc(rf.memoryMb || '')}" oninput="state.docker.runForm.memoryMb = this.value" placeholder="512" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono" />
+                  </label>
+                  <label class="block space-y-1">
+                    <span class="text-[11px] text-[var(--muted-foreground)]">CPU Cores</span>
+                    <input type="number" min="0" step="0.25" value="${esc(rf.cpuCores || '')}" oninput="state.docker.runForm.cpuCores = this.value" placeholder="1.0" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-3'} gap-3">
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Ports ([ip:]host:cnt)</span>
+                  <textarea rows="3" oninput="state.docker.runForm.portsText = this.value" placeholder="127.0.0.1:8088:80&#10;8443:443" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--sidebar)] border border-[var(--border)] font-mono">${esc(rf.portsText || '')}</textarea>
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Volumes (vol:/path)</span>
+                  <textarea rows="3" oninput="state.docker.runForm.volumesText = this.value" placeholder="my_data:/data" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--sidebar)] border border-[var(--border)] font-mono">${esc(rf.volumesText || '')}</textarea>
+                </label>
+                <label class="block space-y-1">
+                  <span class="text-[11px] text-[var(--muted-foreground)]">Env Vars (KEY=VALUE)</span>
+                  <textarea rows="3" oninput="state.docker.runForm.envText = this.value" placeholder="NODE_ENV=production&#10;PORT=80" class="w-full px-2.5 py-1.5 rounded-xl bg-[var(--sidebar)] border border-[var(--border)] font-mono">${esc(rf.envText || '')}</textarea>
+                </label>
+              </div>
+
+              <div class="rounded-xl border border-indigo-500/25 bg-indigo-500/5 p-3 space-y-2">
+                <div class="text-[11px] font-semibold text-indigo-300">Reverse Proxy Traefik &amp; Let's Encrypt SSL (Tùy chọn)</div>
+                <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-2">
+                  <input type="text" value="${esc(rf.domain || '')}" oninput="state.docker.runForm.domain = this.value" placeholder="Domain (vd: tool.bennasolutions.com)" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono" />
+                  <input type="text" value="${esc(rf.containerPort || '')}" oninput="state.docker.runForm.containerPort = this.value" placeholder="Container Port (vd: 80 hoặc 8080)" class="px-2.5 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono" />
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-[11px]">
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" ${rf.enableSsl ? 'checked' : ''} onchange="state.docker.runForm.enableSsl = this.checked" class="rounded" />
+                    <span>Bật Let's Encrypt SSL</span>
+                  </label>
+                  <label class="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                    <input type="checkbox" ${rf.forceHttps ? 'checked' : ''} onchange="state.docker.runForm.forceHttps = this.checked" class="rounded" />
+                    <span>Force HTTPS Redirect</span>
+                  </label>
+                </div>
+              </div>
+
+              ${rf.error ? `<div class="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400">${esc(rf.error)}</div>` : ''}
+            </div>
+            <div class="px-4 py-3 border-t border-[var(--border)] bg-[var(--sidebar)] flex items-center justify-end gap-2">
+              <button type="button" onclick="closeModal()" class="px-3 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">Hủy</button>
+              <button type="submit" ${rf.submitting ? 'disabled' : ''} class="px-4 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-60">
+                ${rf.submitting ? 'Đang Pull & Khởi chạy...' : '▲ Tạo & Chạy Container'}
+              </button>
+            </div>
+          </form>
+        </div>
+      `;
+    }
+
+    function renderTerminalModalHtml(wrapperCls, isMob) {
+      const t = state.docker.terminal || {};
+      return `
+        <div class="${wrapperCls}" onclick="if(event.target===this) closeModal()">
+          <div class="w-full ${isMob ? 'max-h-[90%]' : 'max-w-4xl'} rounded-2xl border border-[var(--border)] bg-[#090d16] shadow-2xl flex flex-col overflow-hidden">
+            <div class="px-4 py-2.5 border-b border-[var(--border)] bg-[var(--content)] flex flex-wrap items-center justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-mono text-xs font-semibold text-emerald-400">&gt;_</span>
+                <span class="text-xs font-semibold font-mono text-[var(--foreground)] truncate">Interactive Shell: ${esc(t.containerName || t.containerId)}</span>
+                <span id="dockerTerminalLiveBadge" class="text-[11px] px-2 py-0.5 rounded-full border font-mono shrink-0 ${t.connected ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : (t.connecting ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'bg-rose-500/15 text-rose-400 border-rose-500/30')}">${t.connected ? '● Live TTY WS' : (t.connecting ? '○ Connecting...' : '× Disconnected')}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <select onchange="openTerminalModal('${esc(t.containerId)}', this.value)" class="px-2 py-1 rounded-lg bg-[var(--sidebar)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]">
+                  <option value="auto" ${t.shell === 'auto' ? 'selected' : ''}>auto (bash/sh)</option>
+                  <option value="sh" ${t.shell === 'sh' ? 'selected' : ''}>/bin/sh</option>
+                  <option value="bash" ${t.shell === 'bash' ? 'selected' : ''}>/bin/bash</option>
+                  <option value="ash" ${t.shell === 'ash' ? 'selected' : ''}>/bin/ash</option>
+                </select>
+                <button type="button" onclick="mountAndConnectTerminal()" class="px-2.5 py-1 rounded-lg bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">↻ Reconnect</button>
+                <button type="button" onclick="closeModal()" class="px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-400 border border-rose-500/30 text-xs font-medium">Đóng</button>
+              </div>
+            </div>
+            ${t.error ? `<div class="px-4 py-2 bg-rose-500/15 border-b border-rose-500/30 text-xs text-rose-300 font-mono">${esc(t.error)}</div>` : ''}
+            <div class="p-3 bg-[#090d16] flex-1 min-h-[380px] max-h-[70vh] flex flex-col">
+              <div id="dockerXtermHost" class="w-full h-[380px]"></div>
+              <div id="dockerFallbackTermWrap" class="hidden flex-1 flex flex-col gap-2">
+                <pre id="dockerFallbackTermPre" class="flex-1 min-h-[320px] max-h-[360px] overflow-y-auto thin-scroll p-3 rounded-xl bg-black/50 border border-slate-800 font-mono text-xs text-slate-200 whitespace-pre-wrap">${esc(t.fallbackBuffer || 'Đang chờ WebSocket TTY...')}</pre>
+                <form onsubmit="sendFallbackTerminalCommand(event)" class="flex items-center gap-2">
+                  <input id="dockerFallbackCmdInput" type="text" value="${esc(t.fallbackInput || '')}" oninput="state.docker.terminal.fallbackInput = this.value" placeholder="Nhập lệnh shell rồi bấm Enter..." class="flex-1 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 font-mono text-xs text-slate-100" />
+                  <button type="submit" class="px-3 py-1.5 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-semibold">Gửi</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
     }
 
     function renderInspectModalHtml(wrapperCls, isMob) {
@@ -6617,6 +7630,16 @@ volumes:
       }
       if (state.modal.type === 'imageHistory') {
         root.innerHTML = renderImageHistoryModalHtml(wrapperCls, isMob);
+        return;
+      }
+      if (state.modal.type === 'runContainer') {
+        root.innerHTML = renderRunContainerModalHtml(wrapperCls, isMob);
+        restoreFocusState(focusSaved);
+        return;
+      }
+      if (state.modal.type === 'terminal') {
+        root.innerHTML = renderTerminalModalHtml(wrapperCls, isMob);
+        restoreFocusState(focusSaved);
         return;
       }
 

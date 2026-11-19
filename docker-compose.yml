@@ -24,13 +24,14 @@ services:
       ALLOW_PAUSE: 1
       ALLOW_UNPAUSE: 1
       SYSTEM: 1
-      # Block high-risk Swarm/Node/Secret/Exec APIs
+      # Enable Exec solely behind Firebase Google single-admin Auth Gate + localhost-only :4180
+      EXEC: 1
+      # Block high-risk Swarm/Node/Secret APIs
       SWARM: 0
       SECRETS: 0
       NODES: 0
       SERVICES: 0
       TASKS: 0
-      EXEC: 0
     networks:
       - hub_internal
 
@@ -92,6 +93,8 @@ services:
       MAH_DATA_FILE: "/data/mah_state.json"
       CLOUDFLARE_DATA_FILE: "/data/cloudflare.json"
       TRAEFIK_DYNAMIC_DIR: "/data/traefik-dynamic"
+      STACKS_DIR: "/data/stacks"
+      REGISTRIES_DATA_FILE: "/data/registries.json"
       VPS_PUBLIC_IP: "${VPS_PUBLIC_IP:-}"
       AUTH_ENFORCE_SETUP: "${AUTH_ENFORCE_SETUP:-true}"
       AUTH_ADMIN_EMAIL: "${AUTH_ADMIN_EMAIL:-theanh2906@gmail.com}"

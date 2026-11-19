@@ -12,10 +12,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/deploym
 
 # Stage 2: Minimal Alpine runtime (~25MB)
 FROM alpine:3.20 AS runner
-RUN apk add --no-cache ca-certificates git tzdata \
+RUN apk add --no-cache ca-certificates git tzdata docker-cli docker-cli-compose \
     && addgroup -S -g 10001 hub \
     && adduser -S -u 10001 -G hub hub \
-    && mkdir -p /data/traefik-dynamic \
+    && mkdir -p /data/traefik-dynamic /data/stacks \
     && chown -R hub:hub /data
 
 WORKDIR /app

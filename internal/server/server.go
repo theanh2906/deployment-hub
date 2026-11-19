@@ -124,6 +124,18 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	mux.HandleFunc("POST /api/v1/networks/prune", s.handlePruneNetworks)
 	mux.HandleFunc("GET /api/v1/docker/events", s.handleListDockerEvents)
 	mux.HandleFunc("GET /api/v1/docker/events/stream", s.handleStreamDockerEvents)
+	mux.HandleFunc("GET /api/v1/stacks", s.handleListStacks)
+	mux.HandleFunc("GET /api/v1/stacks/templates", s.handleListStackTemplates)
+	mux.HandleFunc("GET /api/v1/stacks/{name}", s.handleGetStackDetail)
+	mux.HandleFunc("POST /api/v1/stacks", s.handleDeployStack)
+	mux.HandleFunc("POST /api/v1/stacks/{name}/action", s.handleStackAction)
+	mux.HandleFunc("DELETE /api/v1/stacks/{name}", s.handleDeleteStack)
+	mux.HandleFunc("GET /api/v1/registries", s.handleListRegistries)
+	mux.HandleFunc("POST /api/v1/registries", s.handleSaveRegistry)
+	mux.HandleFunc("DELETE /api/v1/registries/{id}", s.handleDeleteRegistry)
+	mux.HandleFunc("POST /api/v1/images/pull", s.handlePullImage)
+	mux.HandleFunc("POST /api/v1/containers/run", s.handleRunCustomContainer)
+	mux.HandleFunc("GET /api/v1/containers/{id}/exec/ws", s.handleContainerExecWS)
 	mux.HandleFunc("POST /api/v1/proxy/routes/{id}/toggle-ssl", s.handleToggleProxySSL)
 	mux.HandleFunc("POST /api/v1/mock/clean", s.handleClearMockData)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.handleGitHubWebhook)
@@ -1428,6 +1440,147 @@ func (s *apiServer) handleStreamDockerEvents(w http.ResponseWriter, r *http.Requ
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *apiServer) handleListStacks(w http.ResponseWriter, r *http.Request) {
+	stacks, err := s.engine.ListStacks()
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stacks": stacks,
+	})
+}
+
+func (s *apiServer) handleListStackTemplates(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"templates": s.engine.GetServiceTemplates(),
+	})
+}
+
+func (s *apiServer) handleGetStackDetail(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	detail, err := s.engine.GetStackDetail(name)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *apiServer) handleDeployStack(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string `json:"name"`
+		ComposeYAML string `json:"composeYaml"`
+		EnvText     string `json:"envText"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := s.engine.DeployStack(r.Context(), req.Name, req.ComposeYAML, req.EnvText)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleStackAction(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Action string `json:"action"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := s.engine.StackAction(r.Context(), name, req.Action)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleDeleteStack(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	removeVols := r.URL.Query().Get("volumes") == "1" || strings.EqualFold(r.URL.Query().Get("volumes"), "true")
+	res, err := s.engine.DeleteStack(r.Context(), name, removeVols)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleListRegistries(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"registries": s.engine.ListRegistries(),
+	})
+}
+
+func (s *apiServer) handleSaveRegistry(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name     string `json:"name"`
+		Server   string `json:"server"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	reg, err := s.engine.SaveRegistry(req.Name, req.Server, req.Username, req.Password)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, reg)
+}
+
+func (s *apiServer) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.engine.DeleteRegistry(id); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted",
+		"id":     id,
+	})
+}
+
+func (s *apiServer) handlePullImage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Image      string `json:"image"`
+		RegistryID string `json:"registryId"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res, err := s.engine.PullImage(r.Context(), req.Image, req.RegistryID)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleRunCustomContainer(w http.ResponseWriter, r *http.Request) {
+	var req docker.RunContainerRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cnt, err := s.engine.RunCustomContainer(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, cnt)
+}
+
+func (s *apiServer) handleContainerExecWS(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.engine.HandleContainerExecWS(w, r, id)
 }
 
 func (s *apiServer) handleToggleProxySSL(w http.ResponseWriter, r *http.Request) {

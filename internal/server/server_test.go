@@ -14,10 +14,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1519,6 +1522,198 @@ func TestDockerResourcesAndEventsCheckpoint2(t *testing.T) {
 	for _, ep := range []string{"/api/v1/volumes", "/api/v1/networks", "/api/v1/docker/events", "/api/v1/docker/events/stream"} {
 		if r401 := doReq(t, hAuth, http.MethodGet, ep, nil, nil); r401.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 on %s when auth enforced, got %d", ep, r401.Code)
+		}
+	}
+}
+
+func TestDockerCheckpoint3StacksPullRunAndWebSocket(t *testing.T) {
+	t.Setenv("STACKS_DIR", t.TempDir())
+	t.Setenv("REGISTRIES_DATA_FILE", filepath.Join(t.TempDir(), "registries.json"))
+
+	mockBin := filepath.Join(t.TempDir(), "mock-docker")
+	if err := os.WriteFile(mockBin, []byte("#!/bin/sh\necho \"compose ok: $*\"\n"), 0o755); err != nil {
+		t.Fatalf("write mock docker binary: %v", err)
+	}
+	t.Setenv("DOCKER_COMPOSE_BIN", mockBin)
+
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+			_, _ = w.Write([]byte("OK"))
+		case r.URL.Path == "/version":
+			_ = json.NewEncoder(w).Encode(map[string]string{"Version": "29.1.3"})
+		case r.URL.Path == "/info":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Name": "cp3-api", "NCPU": 4, "MemTotal": int64(8) << 30, "ServerVersion": "29.1.3"})
+		case r.URL.Path == "/containers/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"Id": "c-live-0000000001", "Names": []string{"/c-live"}, "Image": "alpine:3.20", "State": "running", "Status": "Up 3m"},
+			})
+		case r.URL.Path == "/images/json":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.URL.Path == "/networks":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "n1", "Name": "bridge", "Driver": "bridge"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/images/create":
+			_, _ = w.Write([]byte("{\"status\":\"Pull complete\",\"id\":\"latest\"}\n"))
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/create":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"Id": "cust-new-123456"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/start") && strings.HasPrefix(r.URL.Path, "/containers/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/containers/c-live-0000000001/exec":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec99"})
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec99/resize":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec99/start":
+			_, _ = io.ReadAll(r.Body)
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				return
+			}
+			conn, brw, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_, _ = io.WriteString(conn, "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			_, _ = io.WriteString(conn, "# ")
+			_, _ = io.Copy(conn, brw)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dockerSrv.Close()
+
+	v, err := vault.New("cp3-server-secret")
+	if err != nil {
+		t.Fatalf("vault.New failed: %v", err)
+	}
+	eng := docker.NewEngine(dockerSrv.URL, v)
+	h := New(eng, v, "hook", fstest.MapFS{})
+
+	// 1. Templates & Stacks API
+	if res := doReq(t, h, http.MethodGet, "/api/v1/stacks/templates", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "postgres16") || !strings.Contains(res.Body.String(), "nats") {
+		t.Fatalf("GET /stacks/templates failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/stacks", map[string]any{
+		"name":        "app-stack",
+		"composeYaml": "services:\n  web:\n    image: nginx:alpine\n",
+		"envText":     "API_SECRET=top-secret-xyz\n",
+	}, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"success":true`) {
+		t.Fatalf("POST /stacks failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/stacks", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "app-stack") {
+		t.Fatalf("GET /stacks failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/api/v1/stacks/app-stack", nil, nil); res.Code != http.StatusOK || strings.Contains(res.Body.String(), "top-secret-xyz") {
+		t.Fatalf("GET /stacks/app-stack leaked plaintext or failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/stacks/app-stack/action", map[string]string{"action": "restart"}, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST /stacks/app-stack/action failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/stacks", map[string]any{
+		"name":        "deployment-hub",
+		"composeYaml": "services:\n  x:\n    image: alpine\n",
+	}, nil); res.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on system stack deployment-hub, got %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/stacks/app-stack", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("DELETE /stacks/app-stack failed: %d %s", res.Code, res.Body.String())
+	}
+
+	// 2. Registries, Pull & Run Custom Container API
+	regRes := doReq(t, h, http.MethodPost, "/api/v1/registries", map[string]string{
+		"name":     "GHCR",
+		"server":   "ghcr.io",
+		"username": "u",
+		"password": "secret-pat-value",
+	}, nil)
+	if regRes.Code != http.StatusCreated || strings.Contains(regRes.Body.String(), "secret-pat-value") {
+		t.Fatalf("POST /registries failed or leaked secret: %d %s", regRes.Code, regRes.Body.String())
+	}
+	var savedReg struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(regRes.Body.Bytes(), &savedReg)
+	if res := doReq(t, h, http.MethodGet, "/api/v1/registries", nil, nil); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "ghcr.io") {
+		t.Fatalf("GET /registries failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/images/pull", map[string]string{"image": "nginx:alpine", "registryId": savedReg.ID}, nil); res.Code != http.StatusOK {
+		t.Fatalf("POST /images/pull failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodPost, "/api/v1/containers/run", map[string]any{
+		"name":  "custom-api",
+		"image": "nginx:alpine",
+		"ports": []string{"127.0.0.1:8089:80"},
+	}, nil); res.Code != http.StatusCreated {
+		t.Fatalf("POST /containers/run failed: %d %s", res.Code, res.Body.String())
+	}
+	if res := doReq(t, h, http.MethodDelete, "/api/v1/registries/"+savedReg.ID, nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("DELETE /registries/{id} failed: %d %s", res.Code, res.Body.String())
+	}
+
+	// 3. WebSocket Terminal Upgrade over HTTP Server
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	u, _ := url.Parse(ts.URL)
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("tcp dial ws server: %v", err)
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(conn, "GET /api/v1/containers/c-live-0000000001/exec/ws?shell=sh&cols=80&rows=24 HTTP/1.1\r\n"+
+		"Host: "+u.Host+"\r\n"+
+		"Origin: "+ts.URL+"\r\n"+
+		"Connection: Upgrade\r\n"+
+		"Upgrade: websocket\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"+
+		"Sec-WebSocket-Version: 13\r\n\r\n")
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 WS upgrade, got status=%q err=%v", statusLine, err)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read ws headers: %v", err)
+		}
+		if strings.TrimRight(line, "\r\n") == "" {
+			break
+		}
+	}
+	// Read banner frame (# )
+	var hdr [2]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		t.Fatalf("read ws banner header: %v", err)
+	}
+	plen := int(hdr[1] & 0x7F)
+	bannerBuf := make([]byte, plen)
+	if _, err := io.ReadFull(br, bannerBuf); err != nil {
+		t.Fatalf("read ws banner body: %v", err)
+	}
+	if string(bannerBuf) != "# " {
+		t.Fatalf("expected '# ' PTY prompt banner, got %q", string(bannerBuf))
+	}
+
+	// 4. Auth enforcement on all Checkpoint 3 endpoints
+	authMgr := auth.NewManagerWithConfig(v, filepath.Join(t.TempDir(), "auth_cp3.json"), auth.DefaultAdminEmail, true)
+	hAuth := NewWithAuth(eng, v, "hook", fstest.MapFS{}, authMgr)
+	authChecks := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodGet, "/api/v1/stacks", nil},
+		{http.MethodGet, "/api/v1/stacks/templates", nil},
+		{http.MethodGet, "/api/v1/registries", nil},
+		{http.MethodPost, "/api/v1/images/pull", map[string]string{"image": "alpine"}},
+		{http.MethodPost, "/api/v1/containers/run", map[string]string{"image": "alpine"}},
+		{http.MethodGet, "/api/v1/containers/c-live-0000000001/exec/ws", nil},
+	}
+	for _, tc := range authChecks {
+		if r401 := doReq(t, hAuth, tc.method, tc.path, tc.body, nil); r401.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on %s %s when auth enforced, got %d", tc.method, tc.path, r401.Code)
 		}
 	}
 }

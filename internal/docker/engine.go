@@ -226,6 +226,11 @@ type Engine struct {
 	recentEvents           []DockerEvent
 	eventSubs              map[chan DockerEvent]struct{}
 	syncNotifyCh           chan struct{}
+	stacksMu               sync.Mutex
+	registriesMu           sync.RWMutex
+	registries             []storedRegistry
+	registriesLoaded       bool
+	registriesLoadedPath   string
 }
 
 // NewEngine initializes the control plane Engine with real host telemetry.
