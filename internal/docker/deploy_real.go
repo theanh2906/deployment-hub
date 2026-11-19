@@ -194,10 +194,19 @@ func (e *Engine) runRealDockerDeployment(dep *deploymentState, req DeployRequest
 		return
 	}
 
+	if preDeleted, preReclaimed, preErr := pruneDanglingDockerImages(ctx, buildClient, baseURL); preErr == nil {
+		if preDeleted > 0 {
+			e.emitDeployEvent(dep, 3, "running", fmt.Sprintf("[3/5] ✓ Pre-deploy cleanup: pruned %d orphan/dangling images (reclaimed %.1f MB)", preDeleted, float64(preReclaimed)/(1024*1024)), false, secrets)
+		} else {
+			e.emitDeployEvent(dep, 3, "running", "[3/5] ✓ Pre-deploy cleanup: no orphan images", false, secrets)
+		}
+	}
+
 	buildQuery := url.Values{}
 	buildQuery.Add("t", imageTagCommit)
 	buildQuery.Add("t", imageTagLatest)
 	buildQuery.Set("rm", "1")
+	buildQuery.Set("forcerm", "1")
 	buildQuery.Set("dockerfile", "Dockerfile")
 
 	buildReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/build?"+buildQuery.Encode(), bytes.NewReader(tarBuf.Bytes()))
@@ -393,6 +402,15 @@ func (e *Engine) runRealDockerDeployment(dep *deploymentState, req DeployRequest
 		e.emitDeployEvent(dep, 4, "running", fmt.Sprintf("[4/5] ✓ Healthcheck GET %s -> HTTP %d OK (%dms)", probeURL, statusCode, probeLatencyMs), false, secrets)
 	} else {
 		e.emitDeployEvent(dep, 4, "running", fmt.Sprintf("[4/5] ✓ Container %s running (port %s/tcp bound to host :%d)", containerName, containerPort, hostPort), false, secrets)
+	}
+
+	postDeleted, postReclaimed, _ := pruneDanglingDockerImages(ctx, buildClient, baseURL)
+	staleDeleted := cleanupStaleAppImages(ctx, buildClient, baseURL, req.AppName, map[string]bool{
+		imageTagCommit: true,
+		imageTagLatest: true,
+	}, 2)
+	if totalPostRemoved := postDeleted + staleDeleted; totalPostRemoved > 0 || postReclaimed > 0 {
+		e.emitDeployEvent(dep, 4, "running", fmt.Sprintf("[4/5] ✓ Post-deploy cleanup: removed %d orphan images (reclaimed %.1f MB)", totalPostRemoved, float64(postReclaimed)/(1024*1024)), false, secrets)
 	}
 
 	// -------------------------------------------------------------------------
@@ -715,4 +733,112 @@ func probeContainerHTTP(targetURL string, attempts int, interval time.Duration) 
 		time.Sleep(interval)
 	}
 	return false, 0, 0
+}
+
+func pruneDanglingDockerImages(ctx context.Context, client *http.Client, baseURL string) (int, int64, error) {
+	if client == nil || strings.TrimSpace(baseURL) == "" {
+		return 0, 0, fmt.Errorf("docker client unavailable")
+	}
+	pruneURL := strings.TrimRight(baseURL, "/") + "/images/prune?filters=" + url.QueryEscape(`{"dangling":["true"]}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pruneURL, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return 0, 0, fmt.Errorf("docker images/prune HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
+	}
+
+	var res struct {
+		ImagesDeleted []struct {
+			Deleted  string `json:"Deleted"`
+			Untagged string `json:"Untagged"`
+		} `json:"ImagesDeleted"`
+		SpaceReclaimed int64 `json:"SpaceReclaimed"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&res); err != nil {
+		return 0, 0, err
+	}
+	deleted := 0
+	for _, item := range res.ImagesDeleted {
+		if strings.TrimSpace(item.Deleted) != "" {
+			deleted++
+		}
+	}
+	if deleted == 0 && len(res.ImagesDeleted) > 0 {
+		deleted = len(res.ImagesDeleted)
+	}
+	return deleted, res.SpaceReclaimed, nil
+}
+
+func cleanupStaleAppImages(ctx context.Context, client *http.Client, baseURL, repoName string, keepTags map[string]bool, keepRecent int) int {
+	cleanRepo := strings.TrimSpace(repoName)
+	if client == nil || strings.TrimSpace(baseURL) == "" || cleanRepo == "" {
+		return 0
+	}
+	trimmedBase := strings.TrimRight(baseURL, "/")
+	apiImages, ok := fetchDockerJSON[[]dockerAPIImage](client, trimmedBase+"/images/json")
+	if !ok {
+		return 0
+	}
+
+	prefix := cleanRepo + ":"
+	latestTag := cleanRepo + ":latest"
+	var candidates []dockerAPIImage
+	for _, img := range apiImages {
+		if len(img.RepoTags) == 0 {
+			continue
+		}
+		allMatch := true
+		protected := false
+		for _, tag := range img.RepoTags {
+			if !strings.HasPrefix(tag, prefix) {
+				allMatch = false
+				break
+			}
+			if tag == latestTag || keepTags[tag] {
+				protected = true
+			}
+		}
+		if allMatch && !protected {
+			candidates = append(candidates, img)
+		}
+	}
+
+	if len(candidates) <= keepRecent {
+		return 0
+	}
+
+	slices.SortFunc(candidates, func(a, b dockerAPIImage) int {
+		if a.Created > b.Created {
+			return -1
+		}
+		if a.Created < b.Created {
+			return 1
+		}
+		return strings.Compare(a.Id, b.Id)
+	})
+
+	startIdx := max(0, keepRecent)
+	deleted := 0
+	for _, img := range candidates[startIdx:] {
+		delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, trimmedBase+"/images/"+url.PathEscape(img.Id), nil)
+		if err != nil {
+			continue
+		}
+		delResp, err := client.Do(delReq)
+		if err != nil {
+			continue
+		}
+		_ = delResp.Body.Close()
+		if delResp.StatusCode >= 200 && delResp.StatusCode < 300 {
+			deleted++
+		}
+	}
+	return deleted
 }

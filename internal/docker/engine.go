@@ -629,6 +629,33 @@ func (e *Engine) ContainerAction(id, action, targetTag string) (Container, error
 
 // PruneDanglingImages deletes all dangling (<none>) images and reclaims disk space.
 func (e *Engine) PruneDanglingImages() PruneResult {
+	e.mu.RLock()
+	runtimeMode := e.vps.RuntimeMode
+	endpoint := e.vps.SocketEndpoint
+	e.mu.RUnlock()
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
+		if client, baseURL, ok := newDockerHTTPClient(endpoint, 30*time.Second); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			deleted, reclaimedBytes, pruneErr := pruneDanglingDockerImages(ctx, client, baseURL)
+			cancel()
+			if pruneErr == nil {
+				e.SyncDockerEngine()
+				e.mu.RLock()
+				resultImages := make([]DockerImage, len(e.images))
+				for i, img := range e.images {
+					resultImages[i] = cloneImage(img)
+				}
+				e.mu.RUnlock()
+				return PruneResult{
+					RemovedCount: deleted,
+					ReclaimedMb:  int(reclaimedBytes / (1024 * 1024)),
+					Images:       resultImages,
+				}
+			}
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

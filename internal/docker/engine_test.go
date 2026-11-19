@@ -2,6 +2,7 @@ package docker
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
@@ -477,5 +478,82 @@ func TestTraefikConfigMatchesAndWriteFileAtomic(t *testing.T) {
 	got2, err := os.ReadFile(targetPath)
 	if err != nil || !bytes.Equal(got2, second) {
 		t.Fatalf("unexpected file contents after update: err=%v got=%q", err, got2)
+	}
+}
+
+func TestPruneDanglingDockerImagesAndStaleAppCleanup(t *testing.T) {
+	var mu sync.Mutex
+	var pruneFilters string
+	var deletedIDs []string
+	var forceSaw bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/images/prune":
+			mu.Lock()
+			pruneFilters = r.URL.Query().Get("filters")
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ImagesDeleted": []map[string]string{
+					{"Deleted": "sha256:orphan1"},
+					{"Deleted": "sha256:orphan2"},
+					{"Untagged": "old:layer"},
+				},
+				"SpaceReclaimed": 157286400, // 150 MiB
+			})
+
+		case r.Method == http.MethodGet && r.URL.Path == "/images/json":
+			_ = json.NewEncoder(w).Encode([]dockerAPIImage{
+				{Id: "sha256:latest-and-current", RepoTags: []string{"my-app:latest", "my-app:commit5"}, Created: 500},
+				{Id: "sha256:keep-recent-1", RepoTags: []string{"my-app:commit4"}, Created: 400},
+				{Id: "sha256:keep-recent-2", RepoTags: []string{"my-app:commit3"}, Created: 300},
+				{Id: "sha256:stale-1", RepoTags: []string{"my-app:commit2"}, Created: 200},
+				{Id: "sha256:stale-2", RepoTags: []string{"my-app:commit1"}, Created: 100},
+				{Id: "sha256:other-repo", RepoTags: []string{"traefik:v3.6"}, Created: 50},
+			})
+
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/images/"):
+			mu.Lock()
+			if r.URL.Query().Get("force") != "" {
+				forceSaw = true
+			}
+			deletedIDs = append(deletedIDs, strings.TrimPrefix(r.URL.Path, "/images/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	deleted, reclaimed, err := pruneDanglingDockerImages(ctx, srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatalf("pruneDanglingDockerImages failed: %v", err)
+	}
+	if deleted != 2 || reclaimed != 157286400 {
+		t.Fatalf("unexpected prune result: deleted=%d reclaimed=%d", deleted, reclaimed)
+	}
+	if pruneFilters != `{"dangling":["true"]}` {
+		t.Fatalf("unexpected prune filters query: %q", pruneFilters)
+	}
+
+	staleRemoved := cleanupStaleAppImages(ctx, srv.Client(), srv.URL, "my-app", map[string]bool{
+		"my-app:commit5": true,
+		"my-app:latest":  true,
+	}, 2)
+	if staleRemoved != 2 {
+		t.Fatalf("expected 2 stale app images removed, got %d (deletedIDs=%v)", staleRemoved, deletedIDs)
+	}
+	if forceSaw {
+		t.Fatal("cleanupStaleAppImages must NOT pass force=true")
+	}
+	joined := strings.Join(deletedIDs, ",")
+	if !strings.Contains(joined, "sha256:stale-1") || !strings.Contains(joined, "sha256:stale-2") {
+		t.Fatalf("expected stale-1 and stale-2 deleted, got %v", deletedIDs)
+	}
+	if strings.Contains(joined, "keep-recent") || strings.Contains(joined, "latest") || strings.Contains(joined, "other-repo") {
+		t.Fatalf("unexpected protected image deleted: %v", deletedIDs)
 	}
 }
