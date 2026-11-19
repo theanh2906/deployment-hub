@@ -6,6 +6,7 @@ package mah
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -374,6 +375,22 @@ func (h *Hub) endpointAndToken(overrideURL, overrideToken string) (string, strin
 		token = t
 	}
 	return baseURL, token
+}
+
+// ValidateBearerToken performs constant-time validation of an incoming Bearer token
+// against the configured MAH API token (returning false if no token is configured).
+func (h *Hub) ValidateBearerToken(candidate string) bool {
+	trimmed := strings.TrimSpace(candidate)
+	if trimmed == "" || h == nil {
+		return false
+	}
+	h.mu.RLock()
+	configured := strings.TrimSpace(h.apiToken)
+	h.mu.RUnlock()
+	if configured == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(trimmed), []byte(configured)) == 1
 }
 
 // GetHealth returns the native Go MAH health check payload (or external /v1/health when configured).

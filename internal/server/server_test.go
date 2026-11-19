@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
+	"deploymenthub/internal/auth"
 	"deploymenthub/internal/detector"
 	"deploymenthub/internal/docker"
 	"deploymenthub/internal/mah"
@@ -946,5 +948,168 @@ func TestNativeGoMahAndV1AndMCPRoutes(t *testing.T) {
 	}
 	if res := doReq(t, h, http.MethodDelete, "/v1/sessions/"+sess2ID, nil, nil); res.Code != http.StatusOK {
 		t.Fatalf("DELETE /v1/sessions/{id} status = %d", res.Code)
+	}
+}
+
+func TestGoogleAuthGateEndToEnd(t *testing.T) {
+	const (
+		clientID     = "gate-test-client.apps.googleusercontent.com"
+		clientSecret = "GOCSPX-gateTestSecret123456"
+	)
+	mockEmail := "stranger@gmail.com"
+	googleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "ya29.gate-token",
+				"token_type":   "Bearer",
+			})
+		case "/userinfo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sub":            "sub-1",
+				"email":          mockEmail,
+				"email_verified": true,
+				"name":           "Test Admin",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer googleSrv.Close()
+
+	v, err := vault.New("server-auth-gate-test-master-key")
+	if err != nil {
+		t.Fatalf("vault.New: %v", err)
+	}
+	eng := docker.NewEngine("", v)
+	authFile := filepath.Join(t.TempDir(), "auth.json")
+	authMgr := auth.NewManagerWithConfig(v, authFile, auth.DefaultAdminEmail, true)
+	authMgr.SetEndpointsForTest(googleSrv.URL+"/oauth", googleSrv.URL+"/token", googleSrv.URL+"/userinfo")
+
+	fsys := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><html><body>DeploymentHub Auth UI</body></html>")},
+	}
+	h := NewWithAuth(eng, v, "hook-secret", fsys, authMgr)
+
+	// 1. Unconfigured + enforced: health, web UI, auth/status = 200; overview & v1/agents = 401
+	if res := doReq(t, h, http.MethodGet, "/api/v1/health", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("expected /api/v1/health 200, got %d", res.Code)
+	}
+	if res := doReq(t, h, http.MethodGet, "/", nil, nil); res.Code != http.StatusOK {
+		t.Fatalf("expected / 200, got %d", res.Code)
+	}
+	stRes := doReq(t, h, http.MethodGet, "/api/v1/auth/status", nil, nil)
+	if stRes.Code != http.StatusOK || !strings.Contains(stRes.Body.String(), `"enforced":true`) || !strings.Contains(stRes.Body.String(), `"configured":false`) {
+		t.Fatalf("unexpected /api/v1/auth/status: %d %s", stRes.Code, stRes.Body.String())
+	}
+	ovUnauth := doReq(t, h, http.MethodGet, "/api/v1/overview", nil, nil)
+	if ovUnauth.Code != http.StatusUnauthorized || !strings.Contains(ovUnauth.Body.String(), `"setupRequired":true`) {
+		t.Fatalf("expected 401 setupRequired on /api/v1/overview, got %d %s", ovUnauth.Code, ovUnauth.Body.String())
+	}
+	if res := doReq(t, h, http.MethodGet, "/v1/agents", nil, nil); res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on /v1/agents, got %d", res.Code)
+	}
+
+	// 2. First-time bootstrap POST /api/v1/auth/google/config succeeds without prior cookie
+	cfgRes := doReq(t, h, http.MethodPost, "/api/v1/auth/google/config", map[string]any{
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+	}, nil)
+	if cfgRes.Code != http.StatusOK || !strings.Contains(cfgRes.Body.String(), `"configured":true`) {
+		t.Fatalf("bootstrap config failed: %d %s", cfgRes.Code, cfgRes.Body.String())
+	}
+
+	// 3. After configuration, unauthenticated POST /api/v1/auth/google/config must return 401
+	reCfgUnauth := doReq(t, h, http.MethodPost, "/api/v1/auth/google/config", map[string]any{
+		"clientId":     "evil-id",
+		"clientSecret": "evil-secret",
+	}, nil)
+	if reCfgUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated overwrite attempt to fail 401, got %d", reCfgUnauth.Code)
+	}
+
+	startLogin := func() (*http.Cookie, string) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/google/login", nil)
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("expected 302 from /api/v1/auth/google/login, got %d", rec.Code)
+		}
+		loc, err := url.Parse(rec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("parse redirect: %v", err)
+		}
+		var stateCookie *http.Cookie
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == auth.OAuthStateCookieName {
+				stateCookie = c
+			}
+		}
+		if stateCookie == nil {
+			t.Fatal("missing OAuth state cookie")
+		}
+		return stateCookie, loc.Query().Get("state")
+	}
+
+	// 4. Unauthorized email redirects to /?auth_error=unauthorized_email without session cookie
+	mockEmail = "stranger@gmail.com"
+	scBad, stateBad := startLogin()
+	cbBadReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/google/callback?state="+url.QueryEscape(stateBad)+"&code=bad-code", nil)
+	cbBadReq.AddCookie(scBad)
+	cbBadRec := httptest.NewRecorder()
+	h.ServeHTTP(cbBadRec, cbBadReq)
+	if cbBadRec.Code != http.StatusFound || cbBadRec.Header().Get("Location") != "/?auth_error=unauthorized_email" {
+		t.Fatalf("unexpected unauthorized callback redirect: %d loc=%q", cbBadRec.Code, cbBadRec.Header().Get("Location"))
+	}
+
+	// 5. Valid admin login sets dh_session cookie and unlocks protected APIs
+	mockEmail = auth.DefaultAdminEmail
+	scOk, stateOk := startLogin()
+	cbOkReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/google/callback?state="+url.QueryEscape(stateOk)+"&code=good-code", nil)
+	cbOkReq.AddCookie(scOk)
+	cbOkRec := httptest.NewRecorder()
+	h.ServeHTTP(cbOkRec, cbOkReq)
+	if cbOkRec.Code != http.StatusFound || cbOkRec.Header().Get("Location") != "/" {
+		t.Fatalf("unexpected admin callback redirect: %d loc=%q", cbOkRec.Code, cbOkRec.Header().Get("Location"))
+	}
+	var sessCookie *http.Cookie
+	for _, c := range cbOkRec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName && c.Value != "" {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("expected dh_session cookie on admin login")
+	}
+
+	ovReq := httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil)
+	ovReq.AddCookie(sessCookie)
+	ovRec := httptest.NewRecorder()
+	h.ServeHTTP(ovRec, ovReq)
+	if ovRec.Code != http.StatusOK {
+		t.Fatalf("expected /api/v1/overview 200 with admin cookie, got %d", ovRec.Code)
+	}
+
+	stAuthedReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil)
+	stAuthedReq.AddCookie(sessCookie)
+	stAuthedRec := httptest.NewRecorder()
+	h.ServeHTTP(stAuthedRec, stAuthedReq)
+	if stAuthedRec.Code != http.StatusOK || !strings.Contains(stAuthedRec.Body.String(), `"authenticated":true`) {
+		t.Fatalf("expected authenticated:true in /api/v1/auth/status, got %d %s", stAuthedRec.Code, stAuthedRec.Body.String())
+	}
+
+	// 6. Logout revokes session so replaying cookie returns 401
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutReq.AddCookie(sessCookie)
+	logoutRec := httptest.NewRecorder()
+	h.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/auth/logout, got %d", logoutRec.Code)
+	}
+
+	replayRec := httptest.NewRecorder()
+	h.ServeHTTP(replayRec, ovReq)
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected replayed session cookie after logout to fail 401, got %d", replayRec.Code)
 	}
 }

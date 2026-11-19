@@ -90,6 +90,12 @@ services:
       CLOUDFLARE_DATA_FILE: "/data/cloudflare.json"
       TRAEFIK_DYNAMIC_DIR: "/data/traefik-dynamic"
       VPS_PUBLIC_IP: "${VPS_PUBLIC_IP:-}"
+      AUTH_ENFORCE_SETUP: "${AUTH_ENFORCE_SETUP:-true}"
+      AUTH_ADMIN_EMAIL: "${AUTH_ADMIN_EMAIL:-theanh2906@gmail.com}"
+      AUTH_DATA_FILE: "/data/auth.json"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      GOOGLE_REDIRECT_URL: "${GOOGLE_REDIRECT_URL:-}"
     volumes:
       - hub_data:/data
       - traefik_dynamic:/data/traefik-dynamic

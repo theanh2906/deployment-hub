@@ -8,13 +8,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"deploymenthub/internal/auth"
 	"deploymenthub/internal/cloudflare"
 	"deploymenthub/internal/detector"
 	"deploymenthub/internal/docker"
@@ -28,8 +31,10 @@ type apiServer struct {
 	engine         *docker.Engine
 	vault          *vault.Vault
 	mahHub         *mah.Hub
+	auth           *auth.Manager
 	webhookSecret  string
 	webFS          fs.FS
+	authConfigBusy atomic.Bool
 	cfConnectBusy  atomic.Bool
 	cfWildcardBusy atomic.Bool
 	cfHubBusy      atomic.Bool
@@ -38,16 +43,30 @@ type apiServer struct {
 // New constructs the DeploymentHub HTTP handler wiring all REST, SSE, webhook,
 // and static web UI routes against the provided Docker engine, vault, and webFS.
 func New(engine *docker.Engine, v *vault.Vault, webhookSecret string, webFS fs.FS) http.Handler {
+	return NewWithAuth(engine, v, webhookSecret, webFS, auth.NewManager(v))
+}
+
+// NewWithAuth constructs the DeploymentHub HTTP handler using a caller-supplied auth.Manager.
+func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, webFS fs.FS, authMgr *auth.Manager) http.Handler {
+	if authMgr == nil {
+		authMgr = auth.NewManager(v)
+	}
 	s := &apiServer{
 		engine:        engine,
 		vault:         v,
 		mahHub:        mah.NewHub(),
+		auth:          authMgr,
 		webhookSecret: webhookSecret,
 		webFS:         webFS,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/v1/auth/google/config", s.handleAuthGoogleConfig)
+	mux.HandleFunc("GET /api/v1/auth/google/login", s.handleAuthGoogleLogin)
+	mux.HandleFunc("GET /api/v1/auth/google/callback", s.handleAuthGoogleCallback)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/v1/projects", s.handleListProjects)
 	mux.HandleFunc("POST /api/v1/projects/{id}/redeploy", s.handleRedeployProject)
@@ -129,7 +148,145 @@ func New(engine *docker.Engine, v *vault.Vault, webhookSecret string, webFS fs.F
 
 	mux.HandleFunc("GET /", s.handleWebUI)
 
-	return withSecurityAndCORS(mux)
+	return withSecurityAndCORS(s.withAuthGate(mux))
+}
+
+func (s *apiServer) withAuthGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.auth == nil || !s.auth.IsEnforced() {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		p := r.URL.Path
+		if (r.Method == http.MethodGet && (p == "/api/v1/health" || p == "/v1/health")) ||
+			strings.HasPrefix(p, "/api/v1/auth/") ||
+			(r.Method == http.MethodPost && p == "/api/v1/webhooks/github") ||
+			(!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/v1/") && p != "/mcp") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if strings.HasPrefix(p, "/v1/") || p == "/mcp" {
+			if _, ok := s.auth.AuthenticateRequest(r); ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+			if len(authHdr) > 7 && strings.EqualFold(authHdr[:7], "Bearer ") {
+				if s.mahHub != nil && s.mahHub.ValidateBearerToken(authHdr[7:]) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":         "authentication required",
+				"authRequired":  true,
+				"setupRequired": !s.auth.IsConfigured(),
+				"adminEmail":    s.auth.AdminEmail(),
+			})
+			return
+		}
+
+		if _, ok := s.auth.AuthenticateRequest(r); !ok {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":         "authentication required",
+				"authRequired":  true,
+				"setupRequired": !s.auth.IsConfigured(),
+				"adminEmail":    s.auth.AdminEmail(),
+			})
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *apiServer) recommendedHubOrigin() string {
+	if s.engine == nil || s.engine.Cloudflare() == nil {
+		return ""
+	}
+	hd := strings.TrimSpace(s.engine.Cloudflare().GetSanitizedConfig().HubDomain)
+	if hd == "" {
+		return ""
+	}
+	return "https://" + hd
+}
+
+func (s *apiServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, s.auth.StatusForRequest(r, s.recommendedHubOrigin()))
+}
+
+func (s *apiServer) handleAuthGoogleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.authConfigBusy.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "Đang lưu cấu hình Google OAuth, vui lòng đợi...")
+		return
+	}
+	defer s.authConfigBusy.Store(false)
+
+	// Allow unauthenticated setup only once during first-time bootstrap; afterward require authenticated admin.
+	if s.auth.IsConfigured() {
+		if _, ok := s.auth.AuthenticateRequest(r); !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":        "authentication required to update Google OAuth settings",
+				"authRequired": true,
+				"adminEmail":   s.auth.AdminEmail(),
+			})
+			return
+		}
+	}
+
+	var req struct {
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+		RedirectURL  string `json:"redirectUrl"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.auth.SaveConfig(req.ClientID, req.ClientSecret, req.RedirectURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.auth.StatusForRequest(r, s.recommendedHubOrigin()))
+}
+
+func (s *apiServer) handleAuthGoogleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	authURL, err := s.auth.StartGoogleLogin(w, r, s.recommendedHubOrigin())
+	if err != nil {
+		http.Redirect(w, r, "/?auth_error=not_configured", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+func (s *apiServer) handleAuthGoogleCallback(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	sess, errCode, err := s.auth.HandleGoogleCallback(w, r)
+	if err != nil {
+		log.Printf("[auth] google callback rejected (code=%s): %v", errCode, err)
+		if errCode == "" {
+			errCode = "auth_failed"
+		}
+		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(errCode), http.StatusFound)
+		return
+	}
+	log.Printf("[auth] admin signed in via Google: %s", sess.Email)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (s *apiServer) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	s.auth.Logout(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "logged_out",
+		"auth":   s.auth.StatusForRequest(r, s.recommendedHubOrigin()),
+	})
 }
 
 func withSecurityAndCORS(next http.Handler) http.Handler {
