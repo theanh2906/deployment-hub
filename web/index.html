@@ -5276,7 +5276,7 @@ volumes:
     async function saveProjectSsl(e) {
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
       const f = state.modal && state.modal.sslForm;
-      if (!f || !canUseBackend()) return;
+      if (!f || !canUseBackend() || f.saving) return;
       f.saving = true;
       f.error = '';
       renderModal();
@@ -5298,19 +5298,20 @@ volumes:
         if (res && res.project && res.project.domain) {
           f.domain = res.project.domain;
         }
+        const savedDomain = f.domain;
+        const trusted = Boolean(f.probe && f.probe.trustedLetsEncrypt);
         f.saving = false;
         await refreshOverview();
         await fetchSslOverview({ silent: true, skipRender: true });
         if (f.cloudflareSyncDns) {
-          await fetchCloudflareStatus({ silent: true, skipRender: true });
+          await fetchCloudflareStatus({ silent: true, skipRender: true, allowConcurrent: true });
         }
+        closeModal();
         renderAll();
-        renderModal();
-        const trusted = Boolean(f.probe && f.probe.trustedLetsEncrypt);
         showToast(
           trusted
-            ? `Đã cấp chứng chỉ Let's Encrypt thành công cho https://${f.domain}!`
-            : `Đã cập nhật route SSL cho ${f.domain}!`,
+            ? `Đã cấp chứng chỉ Let's Encrypt thành công cho https://${savedDomain}!`
+            : `Đã cập nhật route SSL cho ${savedDomain}!`,
           'success'
         );
       } catch (err) {
