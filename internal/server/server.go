@@ -2112,6 +2112,9 @@ func (s *apiServer) handleWebUI(w http.ResponseWriter, r *http.Request) {
 		ctype = "text/html; charset=utf-8"
 	}
 	w.Header().Set("Content-Type", ctype)
+	if strings.HasSuffix(cleanPath, ".html") {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

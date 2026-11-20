@@ -1931,7 +1931,7 @@ volumes:
       const activeAgents = mahAgents.filter(a => a && a.status === 'ACTIVE').length;
       return [
         { id: 'dashboard', label: 'Tổng quan & Projects', shortLabel: 'Tổng quan', badge: `${runningProjects}/${state.projects.length}`, icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>` },
-        { id: 'wizard', label: '+ Deploy Project Mới', shortLabel: 'Deploy', badge: 'AI', icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.7L18.6 9.6l-4.7 1.9L12 16.2l-1.9-4.7-4.7-1.9 4.7-1.9L12 3z"/></svg>` },
+        { id: 'wizard', label: 'Deploy Project Mới', shortLabel: 'Deploy', badge: 'AI', icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.7L18.6 9.6l-4.7 1.9L12 16.2l-1.9-4.7-4.7-1.9 4.7-1.9L12 3z"/></svg>` },
         { id: 'docker', label: 'Quản lý Docker', shortLabel: 'Docker', badge: `${runningCnts}`, icon: dockerIconSvg('w-4 h-4 shrink-0') },
         { id: 'mah', label: 'Multi-Agent Hub', shortLabel: 'Agent Hub', badge: `${activeAgents}/${totalAgents}`, icon: mahIconSvg('w-4 h-4 shrink-0') },
         { id: 'proxy', label: 'VPS & Reverse Proxy', shortLabel: 'VPS/SSL', badge: `${state.proxyRoutes.filter(r => r.ssl).length} SSL`, icon: traefikIconSvg('w-4 h-4 shrink-0') },
@@ -2095,9 +2095,9 @@ volumes:
 
       if (state.viewport === 'desktop') {
         root.innerHTML = `
-          <div class="w-full flex min-h-[calc(100vh-61px)] relative">
+          <div class="w-full flex items-start min-h-[calc(100vh-61px)] relative">
             <!-- Left Sidebar -->
-            <aside class="w-64 shrink-0 bg-[var(--sidebar)] border-r border-[var(--border)] p-4 flex flex-col justify-between gap-4">
+            <aside class="w-64 shrink-0 sticky top-[61px] h-[calc(100vh-61px)] self-start overflow-y-auto thin-scroll bg-[var(--sidebar)] border-r border-[var(--border)] p-4 flex flex-col justify-between gap-4">
               <div class="space-y-4">
                 <!-- Workspace GitHub OAuth Card -->
                 <div class="px-3 py-2.5 rounded-2xl bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent border border-indigo-500/25 flex items-center justify-between gap-2">
@@ -2214,7 +2214,7 @@ volumes:
 
             <!-- Sticky Mobile Bottom Navigation Bar (Native Mobile Experience) -->
             <div class="fixed bottom-0 left-0 right-0 z-30 bg-[var(--sidebar)]/95 backdrop-blur-md border-t border-[var(--border)] px-2 py-1.5 shadow-2xl">
-              <nav class="max-w-lg mx-auto grid grid-cols-5 gap-1">
+              <nav class="max-w-lg mx-auto grid grid-cols-6 gap-1">
                 ${navs.map(n => {
                   const active = state.activeTab === n.id;
                   const cls = active
@@ -2779,9 +2779,12 @@ volumes:
             </div>
 
             <!-- Action Buttons -->
-            <div class="pt-2.5 border-t border-[var(--border)] grid grid-cols-3 gap-1.5">
+            <div class="pt-2.5 border-t border-[var(--border)] grid grid-cols-4 gap-1.5">
               <button type="button" ${isBuilding ? 'disabled' : ''} onclick="quickRedeploy('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/20 hover:opacity-95 disabled:opacity-50 transition">
                 ${isBuilding ? 'Building...' : 'Redeploy'}
+              </button>
+              <button type="button" onclick="openWebhookModal(${escJsArg(p.id)})" class="px-2 py-1.5 rounded-xl text-xs font-medium border transition ${p.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)] hover:bg-[var(--accent)]'}" title="Cấu hình GitHub Auto-Deploy Webhook">
+                ${p.webhookActive ? '🔗 Hook ON' : '🔗 Webhook'}
               </button>
               <button type="button" onclick="toggleRestartProject('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition">
                 ${isStopped ? 'Start' : 'Restart'}
