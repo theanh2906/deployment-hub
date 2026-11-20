@@ -2723,13 +2723,15 @@ volumes:
                 const probe = (state.ssl?.probes || []).find(pr => pr.domain === p.domain);
                 const leOk = Boolean(probe && probe.trustedLetsEncrypt);
                 return `
-                  <div class="rounded-xl bg-[var(--content)] border border-[var(--border)] px-2.5 py-2 space-y-1.5">
+                  <div class="rounded-xl bg-[var(--content)] border border-[var(--border)] px-3 py-2 space-y-2">
                     <div class="flex items-center justify-between gap-2">
                       <a href="${esc(liveUrl)}" target="_blank" rel="noopener noreferrer" onclick="return openProjectUrl(event, ${escJsArg(liveUrl)}, ${escJsArg(directUrl)})" class="inline-flex items-center gap-1.5 text-xs font-mono text-sky-400 hover:text-sky-300 hover:underline min-w-0 flex-1" title="Mở qua Domain Proxy: ${esc(liveUrl)}">
                         <span class="truncate">${esc(liveUrl.replace(/^https?:\/\//, ''))}</span>
                         <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                       </a>
-                      <div class="flex items-center gap-1 shrink-0">
+                    </div>
+                    <div class="flex items-center justify-between gap-1.5 pt-1 border-t border-[var(--border)]/60">
+                      <div class="flex items-center gap-1.5 flex-wrap">
                         <button type="button" onclick="openWebhookModal(${escJsArg(p.id)})" class="px-2 py-0.5 rounded-md text-[11px] font-medium border shrink-0 transition ${p.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)] hover:border-indigo-500/40'}" title="Cấu hình GitHub Auto-Deploy Webhook">
                           ${p.webhookActive ? '🔗 Hook Active' : '🔗 Webhook'}
                         </button>
@@ -2737,13 +2739,10 @@ volumes:
                           ${leOk ? '🔒 Let’s Encrypt' : '🔒 SSL'}
                         </button>
                       </div>
+                      ${hostPort ? `
+                        <a href="${esc(directUrl)}" target="_blank" rel="noopener noreferrer" onclick="return openProjectUrl(event, ${escJsArg(directUrl)})" class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 text-[11px] font-mono font-semibold shrink-0" title="Direct IP:Port (ổn định nhất)">:${esc(hostPort)} ↗</a>
+                      ` : ''}
                     </div>
-                    ${hostPort ? `
-                      <div class="flex items-center justify-between gap-2 text-[11px] font-mono">
-                        <span class="text-[var(--muted-foreground)]">Direct IP:Port (ổn định nhất):</span>
-                        <a href="${esc(directUrl)}" target="_blank" rel="noopener noreferrer" onclick="return openProjectUrl(event, ${escJsArg(directUrl)})" class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25 font-semibold shrink-0">:${esc(hostPort)} ↗</a>
-                      </div>
-                    ` : ''}
                   </div>
                 `;
               })()}
@@ -2758,9 +2757,9 @@ volumes:
               <div class="rounded-xl bg-[var(--content)] border border-[var(--border)] p-2.5 space-y-2">
                 <div class="flex items-center justify-between gap-2">
                   <div class="w-24 shrink-0">${sparklineSvg(p.trend, sparkColor, `prjGrad-${idx}`, 'h-6')}</div>
-                  <div class="flex-1 text-right text-xs font-mono">
-                    <div class="text-[var(--foreground)]">CPU ${p.cpu}% • RAM ${p.ramMb}MB</div>
-                    <div class="text-[var(--muted-foreground)]">Port :${esc(p.port)}</div>
+                  <div class="flex-1 min-w-0 text-right text-xs font-mono">
+                    <div class="text-[var(--foreground)] truncate">CPU ${p.cpu}% • RAM ${p.ramMb}MB</div>
+                    <div class="text-[var(--muted-foreground)] truncate" title="Port :${esc(p.port)}">Port :${esc(String(p.port || '').replace(/^(0\.0\.0\.0|127\.0\.0\.1):/, ''))}</div>
                   </div>
                 </div>
                 <div class="h-1.5 rounded-full bg-[var(--border)] overflow-hidden">
@@ -2778,18 +2777,18 @@ volumes:
               </div>
             </div>
 
-            <!-- Action Buttons -->
-            <div class="pt-2.5 border-t border-[var(--border)] grid grid-cols-4 gap-1.5">
-              <button type="button" ${isBuilding ? 'disabled' : ''} onclick="quickRedeploy('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/20 hover:opacity-95 disabled:opacity-50 transition">
+            <!-- Action Buttons (2 Rows x 2 Columns) -->
+            <div class="pt-2.5 border-t border-[var(--border)] grid grid-cols-2 gap-2">
+              <button type="button" ${isBuilding ? 'disabled' : ''} onclick="quickRedeploy('${esc(p.id)}')" class="px-3 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm shadow-indigo-500/20 hover:opacity-95 disabled:opacity-50 transition whitespace-nowrap">
                 ${isBuilding ? 'Building...' : 'Redeploy'}
               </button>
-              <button type="button" onclick="openWebhookModal(${escJsArg(p.id)})" class="px-2 py-1.5 rounded-xl text-xs font-medium border transition ${p.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)] hover:bg-[var(--accent)]'}" title="Cấu hình GitHub Auto-Deploy Webhook">
-                ${p.webhookActive ? '🔗 Hook ON' : '🔗 Webhook'}
+              <button type="button" onclick="openWebhookModal(${escJsArg(p.id)})" class="px-3 py-2 rounded-xl text-xs font-medium border transition whitespace-nowrap ${p.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)] hover:bg-[var(--accent)]'}" title="Cấu hình GitHub Auto-Deploy Webhook">
+                ${p.webhookActive ? '🔗 Hook Active' : '🔗 Webhook'}
               </button>
-              <button type="button" onclick="toggleRestartProject('${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition">
+              <button type="button" onclick="toggleRestartProject('${esc(p.id)}')" class="px-3 py-2 rounded-xl text-xs font-medium bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition whitespace-nowrap">
                 ${isStopped ? 'Start' : 'Restart'}
               </button>
-              <button type="button" onclick="openLogsModal('project', '${esc(p.id)}')" class="px-2 py-1.5 rounded-xl text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition">
+              <button type="button" onclick="openLogsModal('project', '${esc(p.id)}')" class="px-3 py-2 rounded-xl text-xs font-medium bg-[var(--content)] text-[var(--foreground)] border border-[var(--border)] hover:bg-[var(--accent)] transition whitespace-nowrap">
                 Logs
               </button>
             </div>
