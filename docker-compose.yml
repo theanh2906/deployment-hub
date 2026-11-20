@@ -95,6 +95,7 @@ services:
       TRAEFIK_DYNAMIC_DIR: "/data/traefik-dynamic"
       STACKS_DIR: "/data/stacks"
       REGISTRIES_DATA_FILE: "/data/registries.json"
+      WEBHOOKS_DATA_FILE: "/data/webhooks.json"
       VPS_PUBLIC_IP: "${VPS_PUBLIC_IP:-}"
       AUTH_ENFORCE_SETUP: "${AUTH_ENFORCE_SETUP:-true}"
       AUTH_ADMIN_EMAIL: "${AUTH_ADMIN_EMAIL:-theanh2906@gmail.com}"

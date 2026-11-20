@@ -54,6 +54,9 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	if authMgr == nil {
 		authMgr = auth.NewManager(v)
 	}
+	if engine != nil {
+		engine.SetWebhookSecret(webhookSecret)
+	}
 	s := &apiServer{
 		engine:        engine,
 		vault:         v,
@@ -77,6 +80,10 @@ func NewWithAuth(engine *docker.Engine, v *vault.Vault, webhookSecret string, we
 	mux.HandleFunc("POST /api/v1/projects/{id}/redeploy", s.handleRedeployProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/restart", s.handleRestartProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/ssl", s.handleConfigureProjectSSL)
+	mux.HandleFunc("GET /api/v1/projects/{id}/webhook", s.handleGetProjectWebhook)
+	mux.HandleFunc("POST /api/v1/projects/{id}/webhook/check", s.handleCheckProjectWebhook)
+	mux.HandleFunc("POST /api/v1/projects/{id}/webhook", s.handleConfigureProjectWebhook)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/webhook", s.handleDeleteProjectWebhook)
 	mux.HandleFunc("GET /api/v1/ssl/status", s.handleGetSSLStatus)
 	mux.HandleFunc("POST /api/v1/ssl/settings", s.handleUpdateSSLSettings)
 	mux.HandleFunc("POST /api/v1/ssl/probe", s.handleProbeDomainSSL)
@@ -459,6 +466,67 @@ func (s *apiServer) handleRestartProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, proj)
+}
+
+func (s *apiServer) handleGetProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	cfg, err := s.engine.GetProjectWebhookConfig(id)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *apiServer) handleCheckProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		RepoURL string `json:"repoUrl"`
+		Branch  string `json:"branch"`
+		PAT     string `json:"pat"`
+	}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	res, err := s.engine.CheckProjectWebhookPermission(id, req.RepoURL, req.Branch, req.PAT)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *apiServer) handleConfigureProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		RepoURL     string `json:"repoUrl"`
+		Branch      string `json:"branch"`
+		PAT         string `json:"pat"`
+		AutoWebhook bool   `json:"autoWebhook"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cfg, err := s.engine.ConfigureProjectWebhook(id, req.RepoURL, req.Branch, req.PAT, req.AutoWebhook)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *apiServer) handleDeleteProjectWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		PAT string `json:"pat"`
+	}
+	_ = decodeOptionalJSON(w, r, &req)
+	cfg, err := s.engine.DeleteProjectWebhook(r.Context(), id, req.PAT)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *apiServer) handleConfigureProjectSSL(w http.ResponseWriter, r *http.Request) {

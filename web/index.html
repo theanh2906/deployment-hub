@@ -499,6 +499,11 @@
         patVerified: false,
         patChecking: false,
         patError: '',
+        patCanManageWebhook: false,
+        patWebhookChecked: false,
+        patWebhookReason: '',
+        patScopes: [],
+        patExistingHookId: 0,
         appName: 'deployment-hub',
         domain: defaultAppDomain('deployment-hub'),
         detectMode: 'hybrid',
@@ -520,6 +525,7 @@
         deployId: '',
         serverDockerfile: ''
       },
+      guideSection: 'all',
       modal: {
         open: false,
         type: null,
@@ -533,6 +539,29 @@
           saving: false,
           probing: false,
           probe: null,
+          error: ''
+        },
+        webhookForm: {
+          projectId: '',
+          projectName: '',
+          repoUrl: '',
+          branch: 'main',
+          pat: '',
+          showPat: false,
+          autoWebhook: true,
+          active: false,
+          hookId: 0,
+          hookUrl: '',
+          hasSavedPat: false,
+          tokenPreview: '',
+          checking: false,
+          checked: false,
+          canManageWebhook: false,
+          scopes: [],
+          existingHookId: 0,
+          statusMessage: '',
+          warningReason: '',
+          saving: false,
           error: ''
         }
       },
@@ -1905,7 +1934,8 @@ volumes:
         { id: 'wizard', label: '+ Deploy Project Mới', shortLabel: 'Deploy', badge: 'AI', icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.7L18.6 9.6l-4.7 1.9L12 16.2l-1.9-4.7-4.7-1.9 4.7-1.9L12 3z"/></svg>` },
         { id: 'docker', label: 'Quản lý Docker', shortLabel: 'Docker', badge: `${runningCnts}`, icon: dockerIconSvg('w-4 h-4 shrink-0') },
         { id: 'mah', label: 'Multi-Agent Hub', shortLabel: 'Agent Hub', badge: `${activeAgents}/${totalAgents}`, icon: mahIconSvg('w-4 h-4 shrink-0') },
-        { id: 'proxy', label: 'VPS & Reverse Proxy', shortLabel: 'VPS/SSL', badge: `${state.proxyRoutes.filter(r => r.ssl).length} SSL`, icon: traefikIconSvg('w-4 h-4 shrink-0') }
+        { id: 'proxy', label: 'VPS & Reverse Proxy', shortLabel: 'VPS/SSL', badge: `${state.proxyRoutes.filter(r => r.ssl).length} SSL`, icon: traefikIconSvg('w-4 h-4 shrink-0') },
+        { id: 'guide', label: 'Hướng dẫn & Docs', shortLabel: 'Docs', badge: 'Guide', icon: `<svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>` }
       ];
     }
 
@@ -2250,6 +2280,7 @@ volumes:
       else if (state.activeTab === 'docker') renderDocker(container);
       else if (state.activeTab === 'mah') renderMah(container);
       else if (state.activeTab === 'proxy') renderProxy(container);
+      else if (state.activeTab === 'guide') renderGuide(container);
       restoreFocusState(focusSaved);
 
       if (state.activeTab === 'dashboard' && state.dashboardView === 'topology' && state.viewport !== 'mobile') {
@@ -2610,6 +2641,7 @@ volumes:
               </div>
               <div class="flex flex-wrap items-center gap-2">
                 <button type="button" onclick="quickRedeploy('${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm">Redeploy</button>
+                <button type="button" onclick="openWebhookModal(${escJsArg(selected.id)})" class="px-3 py-1.5 rounded-lg border text-xs font-medium ${selected.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35' : 'bg-[var(--card)] border-[var(--border)] text-[var(--foreground)]'}">${selected.webhookActive ? '🔗 Hook Active' : '🔗 Webhook'}</button>
                 <button type="button" onclick="toggleRestartProject('${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">${selected.status === 'Stopped' ? 'Start' : 'Restart'}</button>
                 <button type="button" onclick="openLogsModal('project', '${esc(selected.id)}')" class="px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] text-xs font-medium text-[var(--foreground)]">Mở Logs</button>
               </div>
@@ -2697,9 +2729,14 @@ volumes:
                         <span class="truncate">${esc(liveUrl.replace(/^https?:\/\//, ''))}</span>
                         <svg class="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                       </a>
-                      <button type="button" onclick="openSslModal(${escJsArg(p.id)})" class="px-2 py-0.5 rounded-md text-[11px] font-medium border shrink-0 transition ${leOk ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/20'}" title="Cấu hình Domain & Let's Encrypt SSL">
-                        ${leOk ? '🔒 Let’s Encrypt' : '🔒 SSL'}
-                      </button>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button type="button" onclick="openWebhookModal(${escJsArg(p.id)})" class="px-2 py-0.5 rounded-md text-[11px] font-medium border shrink-0 transition ${p.webhookActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-[var(--secondary)] text-[var(--secondary-foreground)] border-[var(--border)] hover:border-indigo-500/40'}" title="Cấu hình GitHub Auto-Deploy Webhook">
+                          ${p.webhookActive ? '🔗 Hook Active' : '🔗 Webhook'}
+                        </button>
+                        <button type="button" onclick="openSslModal(${escJsArg(p.id)})" class="px-2 py-0.5 rounded-md text-[11px] font-medium border shrink-0 transition ${leOk ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35 hover:bg-emerald-500/25' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/20'}" title="Cấu hình Domain & Let's Encrypt SSL">
+                          ${leOk ? '🔒 Let’s Encrypt' : '🔒 SSL'}
+                        </button>
+                      </div>
                     </div>
                     ${hostPort ? `
                       <div class="flex items-center justify-between gap-2 text-[11px] font-mono">
@@ -3279,11 +3316,6 @@ volumes:
                   <input id="wizardDomainInput" type="text" value="${esc(w.domain)}" oninput="state.wizard.domain = this.value" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs text-[var(--foreground)] font-mono" />
                 </div>
               </div>
-
-              <label class="flex items-center gap-2 text-xs text-[var(--foreground)] cursor-pointer select-none">
-                <input type="checkbox" ${w.autoWebhook ? 'checked' : ''} onchange="state.wizard.autoWebhook = this.checked" class="rounded" />
-                <span>Tự động gắn GitHub Webhook (Push-to-Deploy khi có commit mới)</span>
-              </label>
             </div>
           ` : `
             <div class="space-y-3">
@@ -3300,13 +3332,13 @@ volumes:
                 <div>
                   <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">GitHub Personal Access Token (PAT)</label>
                   <div class="flex gap-1.5">
-                    <input id="patTokenInput" type="${w.patShow ? 'text' : 'password'}" value="${esc(w.patToken)}" oninput="state.wizard.patToken = this.value; state.wizard.patVerified = false;" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" class="flex-1 px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                    <input id="patTokenInput" type="${w.patShow ? 'text' : 'password'}" value="${esc(w.patToken)}" oninput="onWizardPatInput(this.value)" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" class="flex-1 px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
                     <button type="button" onclick="state.wizard.patShow = !state.wizard.patShow; renderMainView();" class="px-3 py-2 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs">${w.patShow ? 'Ẩn' : 'Hiện'}</button>
                   </div>
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Repository URL (HTTPS / SSH)</label>
-                  <input type="text" value="${esc(w.patRepoUrl)}" oninput="state.wizard.patRepoUrl = this.value; state.wizard.patVerified = false;" placeholder="https://github.com/org/private-repo.git" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+                  <input type="text" value="${esc(w.patRepoUrl)}" oninput="state.wizard.patRepoUrl = this.value; state.wizard.patVerified = false; state.wizard.patWebhookChecked = false; state.wizard.patCanManageWebhook = false; state.wizard.patWebhookReason = '';" placeholder="https://github.com/org/private-repo.git" class="w-full px-3 py-2 rounded-xl bg-[var(--content)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
                 </div>
               </div>
 
@@ -3330,10 +3362,12 @@ volumes:
                   ${w.patChecking ? 'Đang kiểm tra kết nối GitHub...' : 'Kiểm tra & Import'}
                 </button>
                 ${w.patError ? `<span class="text-xs text-rose-500 font-medium">${esc(w.patError)}</span>` : ''}
-                ${w.patVerified ? `<span class="text-xs px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-medium">✓ Token hợp lệ • Quyền repo, admin:repo_hook • AES-256 Encrypted</span>` : ''}
+                ${w.patVerified ? `<span class="text-xs px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 ring-2 ring-emerald-500/15 font-medium">✓ Token hợp lệ • Quyền ${esc((w.patScopes || []).join(', ') || 'repo')} • AES-256 Encrypted</span>` : ''}
               </div>
             </div>
           `}
+
+          ${renderWizardAutoWebhookSectionHtml(w, isMob)}
 
           <div class="pt-3 border-t border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
             <div class="text-xs">
@@ -3406,6 +3440,9 @@ volumes:
       state.wizard.presetSelection = 'auto';
       state.wizard.detectedFiles = [];
       state.wizard.serverDockerfile = '';
+      state.wizard.patWebhookChecked = false;
+      state.wizard.patCanManageWebhook = false;
+      state.wizard.patWebhookReason = '';
       syncAutoDetectForCurrentRepo(false);
       if (preset && STACK_PRESETS[preset]) {
         applyWizardPreset(preset, false);
@@ -3504,6 +3541,110 @@ volumes:
       }, 260);
     }
 
+    function onWizardPatInput(val) {
+      const w = state.wizard;
+      w.patToken = val;
+      w.patVerified = false;
+      w.patWebhookChecked = false;
+      w.patCanManageWebhook = false;
+      w.patWebhookReason = '';
+      w.patScopes = [];
+      w.patError = '';
+    }
+
+    function renderWizardAutoWebhookSectionHtml(w, isMob) {
+      const hasPerm = Boolean(w.patCanManageWebhook);
+      const checked = Boolean(w.patWebhookChecked);
+      const disabledAttr = hasPerm ? '' : 'disabled';
+      return `
+        <div id="wizardAutoWebhookPanel" class="rounded-2xl border ${hasPerm ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-[var(--border)] bg-[var(--content)]/60'} p-3.5 space-y-2.5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <label class="inline-flex items-center gap-2 text-xs select-none ${hasPerm ? 'text-[var(--foreground)] cursor-pointer font-medium' : 'text-[var(--muted-foreground)] opacity-60 cursor-not-allowed'}">
+              <input id="wizardAutoWebhookCheckbox" type="checkbox" ${w.autoWebhook ? 'checked' : ''} ${disabledAttr} onchange="state.wizard.autoWebhook = this.checked" class="rounded ${hasPerm ? '' : 'opacity-50 cursor-not-allowed'}" />
+              <span>Tự động gắn GitHub Webhook (Push-to-Deploy khi có commit mới)</span>
+            </label>
+            <button type="button" onclick="setTab('guide')" class="text-[11px] text-indigo-400 hover:underline font-medium shrink-0">📖 Xem Hướng dẫn Webhook →</button>
+          </div>
+
+          ${w.scmMode === 'oauth' ? `
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="wizardWebhookPatInput" type="${w.patShow ? 'text' : 'password'}" value="${esc(w.patToken || '')}" oninput="onWizardPatInput(this.value)" placeholder="Nhập GitHub PAT (hoặc để trống nếu đã lưu Vault)..." class="flex-1 min-w-[200px] px-3 py-1.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
+              <button type="button" onclick="checkWizardWebhookPat()" class="px-3 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] hover:bg-[var(--accent)] text-xs font-semibold shrink-0">
+                ${w.patChecking ? 'Đang kiểm tra quyền...' : 'Kiểm tra quyền Webhook'}
+              </button>
+            </div>
+          ` : ''}
+
+          ${checked && hasPerm ? `
+            <div class="text-xs text-emerald-400 flex items-center gap-1.5 font-medium">
+              <span>✓</span>
+              <span>${esc(w.patWebhookReason || 'PAT có đủ quyền quản trị GitHub Webhook (admin:repo_hook) — sẽ tự động gắn lên repo khi Deploy!')}</span>
+            </div>
+          ` : checked && !hasPerm ? `
+            <div id="wizardWebhookWarning" class="p-2.5 rounded-xl border border-amber-500/35 bg-amber-500/10 text-xs text-amber-300 leading-relaxed">
+              ⚠️ <strong>PAT chưa đủ quyền tự động gắn Webhook:</strong> ${esc(w.patWebhookReason || 'Thiếu scope admin:repo_hook hoặc Webhooks: Read and write.')} Option tự động gắn đã bị khoá (grey out) — bạn vẫn có thể deploy bình thường hoặc cấu hình thủ công tại mục <strong>Hướng dẫn &amp; Docs</strong>.
+            </div>
+          ` : `
+            <div id="wizardWebhookWarning" class="text-[11px] text-amber-400/90 leading-relaxed">
+              ⚠️ <strong>Chưa kiểm tra quyền GitHub PAT:</strong> Hệ thống cần kiểm tra PAT có scope <code class="font-mono">admin:repo_hook</code> (hoặc <code class="font-mono">Webhooks: Read &amp; Write</code>) trước khi kích hoạt. Nếu không có PAT, checkbox tạm thời bị grey out và bạn vẫn có thể gắn Webhook thủ công sau khi deploy.
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    async function checkWizardWebhookPat() {
+      const w = state.wizard;
+      const repoUrl = w.scmMode === 'oauth' ? w.oauthRepo : w.patRepoUrl;
+      if (!canUseBackend()) {
+        const tok = String(w.patToken || '').trim();
+        w.patWebhookChecked = true;
+        if (!tok) {
+          w.patCanManageWebhook = false;
+          w.patWebhookReason = 'Chưa nhập GitHub PAT.';
+        } else if (/nohook|readonly/i.test(tok)) {
+          w.patCanManageWebhook = false;
+          w.patWebhookReason = 'PAT thiếu scope admin:repo_hook.';
+        } else {
+          w.patCanManageWebhook = true;
+          w.patWebhookReason = 'PAT đủ quyền quản trị Webhook (simulator).';
+          w.autoWebhook = true;
+        }
+        renderMainView();
+        return;
+      }
+      w.patChecking = true;
+      w.patError = '';
+      renderMainView();
+      try {
+        const res = await apiFetch('/scm/verify-pat', {
+          method: 'POST',
+          body: JSON.stringify({ token: String(w.patToken || '').trim(), repoUrl: String(repoUrl || '').trim() })
+        });
+        w.patChecking = false;
+        w.patVerified = Boolean(res.valid);
+        w.patWebhookChecked = true;
+        w.patCanManageWebhook = Boolean(res.canManageWebhook);
+        w.patWebhookReason = res.webhookReason || '';
+        w.patScopes = Array.isArray(res.scopes) ? res.scopes : [];
+        w.patExistingHookId = res.existingHookId || 0;
+        if (w.patCanManageWebhook) {
+          w.autoWebhook = true;
+        }
+        renderMainView();
+        showToast(
+          w.patCanManageWebhook ? 'PAT có đủ quyền tự động gắn GitHub Webhook!' : 'PAT chưa đủ quyền gắn Webhook (đã hiển thị cảnh báo)',
+          w.patCanManageWebhook ? 'success' : 'warn'
+        );
+      } catch (err) {
+        w.patChecking = false;
+        w.patWebhookChecked = true;
+        w.patCanManageWebhook = false;
+        w.patWebhookReason = (err && err.message) ? err.message : 'Chưa có PAT hợp lệ trong Vault';
+        renderMainView();
+      }
+    }
+
     async function validatePatImport() {
       const w = state.wizard;
       if (!w.patToken.trim() || !w.patRepoUrl.trim()) {
@@ -3524,6 +3665,19 @@ volumes:
           });
           w.patChecking = false;
           w.patVerified = Boolean(res.valid);
+          w.patWebhookChecked = true;
+          w.patCanManageWebhook = Boolean(res.canManageWebhook);
+          w.patWebhookReason = res.webhookReason || '';
+          w.patScopes = Array.isArray(res.scopes) ? res.scopes : [];
+          w.patExistingHookId = res.existingHookId || 0;
+          if (w.patCanManageWebhook) {
+            w.autoWebhook = true;
+          }
+          if (!w.patVerified) {
+            w.patError = w.patWebhookReason || 'GitHub PAT không hợp lệ';
+            renderMainView();
+            return;
+          }
           w.presetSelection = 'auto';
           if (res.detectResult) {
             applyDetectResultToWizard(res.detectResult, true);
@@ -4016,7 +4170,7 @@ volumes:
             buildCmd: w.buildCmd,
             startCmd: w.startCmd,
             portMapping: w.portMapping,
-            autoWebhook: w.autoWebhook,
+            autoWebhook: Boolean(w.autoWebhook && w.patCanManageWebhook),
             envVars: w.envVars
           })
         });
@@ -6483,14 +6637,17 @@ volumes:
           <!-- Webhook & SSH/Docker Socket Settings -->
           <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-4">
             <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-transparent p-4 space-y-3 shadow-sm">
-              <div class="flex items-center gap-2 text-xs font-semibold text-[var(--foreground)]">
-                ${githubIconSvg('w-4 h-4')}
-                <span>Webhook Auto-Deploy URL (GitHub Push)</span>
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 text-xs font-semibold text-[var(--foreground)]">
+                  ${githubIconSvg('w-4 h-4')}
+                  <span>Webhook Auto-Deploy URL (GitHub Push)</span>
+                </div>
+                <button type="button" onclick="setTab('guide')" class="text-[11px] text-indigo-400 hover:underline font-medium">📖 Hướng dẫn chi tiết →</button>
               </div>
-              <p class="text-xs text-[var(--muted-foreground)]">Dán URL này vào GitHub Repo Settings → Webhooks hoặc để OAuth App tự cấu hình.</p>
+              <p class="text-xs text-[var(--muted-foreground)]">Dán URL này vào GitHub Repo Settings → Webhooks hoặc cấu hình trên từng Project đã deploy bằng nút <code class="font-mono">🔗 Webhook</code>.</p>
               <div class="flex gap-2">
                 <input type="text" readonly value="${esc(state.webhookUrl)}" class="flex-1 px-3 py-2 rounded-xl bg-[var(--card)] border border-[var(--border)] text-xs font-mono text-[var(--foreground)]" />
-                <button type="button" onclick="copyWebhookUrl()" class="px-3 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shrink-0 shadow-sm">Copy URL</button>
+                <button type="button" onclick="copyWebhookUrl()" class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shrink-0 shadow-sm">${copyIconSvg('w-3.5 h-3.5')}<span>Copy URL</span></button>
               </div>
               <div class="flex items-center justify-between pt-1 text-xs">
                 <span class="text-[var(--muted-foreground)]">Signature: <code class="font-mono text-[var(--foreground)]">X-Hub-Signature-256</code></span>
@@ -7832,7 +7989,497 @@ volumes:
           </div>
         `;
         restoreFocusState(focusSaved);
+      } else if (state.modal.type === 'webhook') {
+        root.innerHTML = renderWebhookModalHtml(wrapperCls, isMob);
+        restoreFocusState(focusSaved);
       }
+    }
+
+    function copyIconSvg(cls = 'w-3.5 h-3.5') {
+      return `<svg class="${cls} shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    }
+
+    function copyTextDirect(val, label) {
+      const txt = String(val || '');
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(txt).catch(() => {});
+      }
+      showToast(`Đã sao chép ${label || 'nội dung'} vào clipboard!`, 'success');
+    }
+
+    function copyFromDataAttr(el) {
+      if (!el || typeof el.getAttribute !== 'function') return;
+      const txt = el.getAttribute('data-copy-text') || '';
+      const label = el.getAttribute('data-copy-label') || 'nội dung';
+      copyTextDirect(txt, label);
+    }
+
+    function guideCopyInlineHtml(text, label, mono = true) {
+      return `
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-[var(--sidebar)] border border-[var(--border)] max-w-full align-middle">
+          <code class="text-[11px] ${mono ? 'font-mono text-sky-400' : 'text-[var(--foreground)]'} break-all">${esc(text)}</code>
+          <button type="button" data-copy-text="${esc(text)}" data-copy-label="${esc(label || text)}" onclick="copyFromDataAttr(this)" title="Copy ${esc(label || text)}" class="p-1 rounded-md text-[var(--muted-foreground)] hover:text-emerald-400 hover:bg-emerald-500/10 transition cursor-pointer shrink-0">
+            ${copyIconSvg('w-3.5 h-3.5')}
+          </button>
+        </span>
+      `;
+    }
+
+    function guideCodeBlockHtml(title, code) {
+      return `
+        <div class="rounded-xl border border-[var(--border)] bg-[#090d16] overflow-hidden shadow-sm">
+          <div class="px-3.5 py-2 border-b border-slate-800 bg-slate-900/70 flex items-center justify-between gap-2">
+            <span class="text-[11px] font-mono text-slate-400">${esc(title)}</span>
+            <button type="button" data-copy-text="${esc(code)}" data-copy-label="${esc(title)}" onclick="copyFromDataAttr(this)" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-slate-200 transition cursor-pointer">
+              ${copyIconSvg('w-3.5 h-3.5')}
+              <span>Copy</span>
+            </button>
+          </div>
+          <pre class="p-3.5 text-xs font-mono text-slate-200 overflow-x-auto thin-scroll leading-relaxed whitespace-pre">${esc(code)}</pre>
+        </div>
+      `;
+    }
+
+    async function openWebhookModal(projectId) {
+      stopModalLogStream();
+      if (typeof closeTerminalSession === 'function') closeTerminalSession();
+      state.mah.settingsOpen = false;
+      state.mah.registerAgentOpen = false;
+      const proj = (state.projects || []).find(p => p.id === projectId || p.name === projectId);
+      if (!proj) return;
+      const hookTargetUrl = state.webhookUrl || `${defaultOrigin()}/api/v1/webhooks/github`;
+      state.modal = {
+        open: true,
+        type: 'webhook',
+        targetKind: 'project',
+        targetId: proj.id,
+        logFilter: '',
+        sslForm: state.modal.sslForm,
+        webhookForm: {
+          projectId: proj.id,
+          projectName: proj.name,
+          repoUrl: proj.repo || '',
+          branch: (!proj.branch || proj.branch === 'live') ? 'main' : proj.branch,
+          pat: '',
+          showPat: false,
+          autoWebhook: true,
+          active: Boolean(proj.webhookActive),
+          hookId: proj.webhookId || 0,
+          hookUrl: hookTargetUrl,
+          hasSavedPat: false,
+          tokenPreview: '',
+          checking: false,
+          checked: false,
+          canManageWebhook: false,
+          scopes: [],
+          existingHookId: proj.webhookId || 0,
+          statusMessage: proj.webhookStatus || '',
+          warningReason: '',
+          saving: false,
+          error: ''
+        }
+      };
+      renderModal();
+
+      if (!canUseBackend()) return;
+      try {
+        const cfg = await apiFetch(`/projects/${encodeURIComponent(proj.id)}/webhook`);
+        if (!state.modal.open || state.modal.type !== 'webhook' || state.modal.targetId !== proj.id) return;
+        const wf = state.modal.webhookForm;
+        wf.repoUrl = cfg.repoUrl || wf.repoUrl;
+        wf.branch = cfg.branch || wf.branch;
+        wf.autoWebhook = true;
+        wf.active = Boolean(cfg.active);
+        wf.hookId = cfg.hookId || 0;
+        wf.hookUrl = cfg.hookUrl || hookTargetUrl;
+        wf.hasSavedPat = Boolean(cfg.hasSavedPat);
+        wf.tokenPreview = cfg.tokenPreview || '';
+        wf.statusMessage = cfg.statusMessage || '';
+        renderModal();
+        if (wf.hasSavedPat) {
+          checkModalProjectWebhook(true);
+        }
+      } catch (err) {
+        if (state.modal.open && state.modal.type === 'webhook') {
+          state.modal.webhookForm.error = err && err.message ? err.message : 'Không thể tải cấu hình webhook';
+          renderModal();
+        }
+      }
+    }
+
+    async function checkModalProjectWebhook(silent = false) {
+      const wf = state.modal && state.modal.webhookForm;
+      if (!wf) return;
+      if (!canUseBackend()) {
+        wf.checked = true;
+        const tok = String(wf.pat || '').trim();
+        if (!tok && !wf.hasSavedPat) {
+          wf.canManageWebhook = false;
+          wf.warningReason = 'Chưa có GitHub PAT. Vui lòng nhập PAT có quyền admin:repo_hook.';
+        } else if (/nohook|readonly/i.test(tok)) {
+          wf.canManageWebhook = false;
+          wf.warningReason = 'PAT thiếu scope admin:repo_hook.';
+        } else {
+          wf.canManageWebhook = true;
+          wf.autoWebhook = true;
+          wf.warningReason = 'PAT đủ quyền tạo & cập nhật GitHub Webhook (simulator).';
+        }
+        if (state.modal.open && state.modal.type === 'webhook') renderModal();
+        return;
+      }
+
+      wf.checking = true;
+      wf.error = '';
+      if (state.modal.open && state.modal.type === 'webhook') renderModal();
+      try {
+        const res = await apiFetch(`/projects/${encodeURIComponent(wf.projectId)}/webhook/check`, {
+          method: 'POST',
+          body: JSON.stringify({
+            repoUrl: wf.repoUrl.trim(),
+            branch: wf.branch.trim(),
+            pat: wf.pat.trim()
+          })
+        });
+        if (!state.modal.open || state.modal.type !== 'webhook') return;
+        wf.checking = false;
+        wf.checked = true;
+        wf.canManageWebhook = Boolean(res.canManageWebhook);
+        wf.warningReason = res.webhookReason || '';
+        wf.scopes = Array.isArray(res.scopes) ? res.scopes : [];
+        wf.existingHookId = res.existingHookId || 0;
+        if (res.webhookUrl) wf.hookUrl = res.webhookUrl;
+        if (wf.canManageWebhook) {
+          wf.autoWebhook = true;
+        }
+        renderModal();
+        if (!silent) {
+          showToast(
+            wf.canManageWebhook ? 'PAT đủ quyền quản trị Webhook!' : 'PAT chưa đủ quyền gắn Webhook (đã hiển thị cảnh báo)',
+            wf.canManageWebhook ? 'success' : 'warn'
+          );
+        }
+      } catch (err) {
+        if (!state.modal.open || state.modal.type !== 'webhook') return;
+        wf.checking = false;
+        wf.checked = true;
+        wf.canManageWebhook = false;
+        wf.warningReason = (err && err.message) ? err.message : 'Kiểm tra PAT thất bại';
+        renderModal();
+      }
+    }
+
+    async function saveProjectWebhook(e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      const wf = state.modal && state.modal.webhookForm;
+      if (!wf || wf.saving || !canUseBackend()) return;
+      wf.saving = true;
+      wf.error = '';
+      renderModal();
+      try {
+        const res = await apiFetch(`/projects/${encodeURIComponent(wf.projectId)}/webhook`, {
+          method: 'POST',
+          body: JSON.stringify({
+            repoUrl: wf.repoUrl.trim(),
+            branch: wf.branch.trim() || 'main',
+            pat: wf.pat.trim(),
+            autoWebhook: Boolean(wf.autoWebhook && wf.canManageWebhook)
+          })
+        });
+        wf.saving = false;
+        await refreshOverview();
+        closeModal();
+        renderAll();
+        showToast(
+          res && res.active
+            ? `Đã gắn GitHub Webhook #${res.hookId || ''} cho ${wf.projectName}!`
+            : `Đã lưu cấu hình repo/branch cho ${wf.projectName}!`,
+          'success'
+        );
+      } catch (err) {
+        wf.saving = false;
+        wf.error = (err && err.message) ? err.message : 'Lưu Webhook thất bại';
+        renderModal();
+        showToast(wf.error, 'error');
+      }
+    }
+
+    async function deleteProjectWebhook() {
+      const wf = state.modal && state.modal.webhookForm;
+      if (!wf || wf.saving || !canUseBackend()) return;
+      if (!confirm(`Gỡ GitHub Webhook khỏi project "${wf.projectName}"?`)) return;
+      wf.saving = true;
+      wf.error = '';
+      renderModal();
+      try {
+        await apiFetch(`/projects/${encodeURIComponent(wf.projectId)}/webhook`, { method: 'DELETE' });
+        wf.saving = false;
+        wf.active = false;
+        wf.hookId = 0;
+        wf.statusMessage = 'Đã gỡ GitHub Webhook';
+        await refreshOverview();
+        renderAll();
+        renderModal();
+        showToast(`Đã gỡ Webhook khỏi ${wf.projectName}`, 'warn');
+      } catch (err) {
+        wf.saving = false;
+        wf.error = (err && err.message) ? err.message : 'Gỡ Webhook thất bại';
+        renderModal();
+      }
+    }
+
+    function renderWebhookModalHtml(wrapperCls, isMob) {
+      const wf = (state.modal && state.modal.webhookForm) || {};
+      const hasPerm = Boolean(wf.canManageWebhook);
+      const checked = Boolean(wf.checked);
+      const hookUrl = wf.hookUrl || state.webhookUrl || `${defaultOrigin()}/api/v1/webhooks/github`;
+      return `
+        <div class="${wrapperCls}" onclick="if(event.target===this) closeModal()">
+          <form onsubmit="saveProjectWebhook(event)" class="w-full ${isMob ? 'max-h-[92%]' : 'max-w-xl max-h-[92vh]'} rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl flex flex-col overflow-hidden">
+            <div class="px-4 py-3 border-b border-[var(--border)] bg-[var(--sidebar)] flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="w-7 h-7 rounded-lg bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 flex items-center justify-center shrink-0">🔗</span>
+                <div class="min-w-0">
+                  <div class="text-xs font-semibold text-[var(--foreground)] truncate">Cấu hình GitHub Webhook: ${esc(wf.projectName || wf.projectId)}</div>
+                  <div class="text-[11px] text-[var(--muted-foreground)] truncate">
+                    ${wf.active ? `<span class="text-emerald-400 font-semibold">● Webhook Active (#${esc(wf.hookId || '')})</span>` : 'Push-to-Deploy khi có commit mới lên branch'}
+                  </div>
+                </div>
+              </div>
+              <button type="button" onclick="closeModal()" class="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] px-2 py-1 shrink-0">Đóng</button>
+            </div>
+
+            <div class="p-4 overflow-y-auto thin-scroll space-y-3 text-xs">
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-3'} gap-2.5">
+                <div class="${isMob ? '' : 'col-span-2'}">
+                  <label class="block text-[11px] font-medium text-[var(--muted-foreground)] mb-1">GitHub Repository (owner/repo hoặc URL)</label>
+                  <input id="modalWebhookRepoInput" type="text" required value="${esc(wf.repoUrl || '')}" oninput="state.modal.webhookForm.repoUrl = this.value; state.modal.webhookForm.checked = false; state.modal.webhookForm.canManageWebhook = false;" placeholder="theanh2906/flow-studio" class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                </div>
+                <div>
+                  <label class="block text-[11px] font-medium text-[var(--muted-foreground)] mb-1">Branch Trigger</label>
+                  <input id="modalWebhookBranchInput" type="text" required value="${esc(wf.branch || 'main')}" oninput="state.modal.webhookForm.branch = this.value" placeholder="main" class="w-full px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                </div>
+              </div>
+
+              <div class="space-y-1.5">
+                <div class="flex items-center justify-between gap-2">
+                  <label class="text-[11px] font-medium text-[var(--muted-foreground)]">GitHub PAT (yêu cầu quyền <code class="font-mono">admin:repo_hook</code> hoặc <code class="font-mono">Webhooks: Read &amp; Write</code>)</label>
+                  ${wf.hasSavedPat ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono">🔐 Vault PAT sẵn có</span>` : ''}
+                </div>
+                <div class="flex gap-1.5">
+                  <input id="modalWebhookPatInput" type="${wf.showPat ? 'text' : 'password'}" value="${esc(wf.pat || '')}" oninput="state.modal.webhookForm.pat = this.value; state.modal.webhookForm.checked = false; state.modal.webhookForm.canManageWebhook = false; state.modal.webhookForm.warningReason = '';" placeholder="${wf.hasSavedPat ? 'Để trống = dùng PAT đã lưu Vault, hoặc nhập mới...' : 'ghp_xxxx hoặc github_pat_xxxx...'}" class="flex-1 px-3 py-1.5 rounded-xl bg-[var(--content)] border border-[var(--border)] font-mono text-[var(--foreground)]" />
+                  <button type="button" onclick="state.modal.webhookForm.showPat = !state.modal.webhookForm.showPat; renderModal();" class="px-2.5 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)]">${wf.showPat ? 'Ẩn' : 'Hiện'}</button>
+                  <button type="button" ${wf.checking ? 'disabled' : ''} onclick="checkModalProjectWebhook(false)" class="px-3 py-1.5 rounded-xl bg-indigo-500/15 text-indigo-300 border border-indigo-500/35 hover:bg-indigo-500/25 font-semibold shrink-0 disabled:opacity-60">
+                    ${wf.checking ? 'Đang check...' : 'Kiểm tra quyền'}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Auto-attach checkbox with permission gate & grey-out warning -->
+              <div class="rounded-xl border ${hasPerm ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-[var(--border)] bg-[var(--content)]/60'} p-3 space-y-2">
+                <label class="inline-flex items-center gap-2 select-none ${hasPerm ? 'text-[var(--foreground)] cursor-pointer font-semibold' : 'text-[var(--muted-foreground)] opacity-60 cursor-not-allowed'}">
+                  <input id="modalAutoWebhookCheckbox" type="checkbox" ${wf.autoWebhook ? 'checked' : ''} ${hasPerm ? '' : 'disabled'} onchange="state.modal.webhookForm.autoWebhook = this.checked" class="rounded ${hasPerm ? '' : 'opacity-50 cursor-not-allowed'}" />
+                  <span>Tự động gắn GitHub Webhook (Push-to-Deploy khi có commit mới)</span>
+                </label>
+
+                ${checked && hasPerm ? `
+                  <div class="text-[11px] text-emerald-400">
+                    ✓ ${esc(wf.warningReason)} ${wf.existingHookId ? `(Sẽ cập nhật Hook #${wf.existingHookId})` : ''}
+                  </div>
+                ` : checked && !hasPerm ? `
+                  <div id="modalWebhookWarning" class="p-2.5 rounded-xl border border-amber-500/35 bg-amber-500/10 text-[11px] text-amber-300 leading-relaxed">
+                    ⚠️ <strong>PAT không có quyền gắn Webhook:</strong> ${esc(wf.warningReason)} Option đã bị grey out — bạn vẫn có thể gắn Webhook thủ công theo thông tin Copy bên dưới.
+                  </div>
+                ` : `
+                  <div id="modalWebhookWarning" class="text-[11px] text-amber-400/90 leading-relaxed">
+                    ⚠️ Nhập GitHub PAT rồi bấm <strong>Kiểm tra quyền</strong> để mở khoá tự động gắn Webhook. Khi thiếu quyền, ô tích mặc định sẽ bị grey out để tránh lỗi 403/404 từ GitHub.
+                  </div>
+                `}
+              </div>
+
+              <!-- Quick Manual Copy Box -->
+              <div class="rounded-xl border border-[var(--border)] bg-[var(--sidebar)] p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-semibold text-[var(--foreground)]">Thông tin gắn Webhook thủ công trên GitHub</span>
+                  <button type="button" onclick="closeModal(); setTab('guide');" class="text-[11px] text-indigo-400 hover:underline font-medium">📖 Mở trang Hướng dẫn →</button>
+                </div>
+                <div class="space-y-1.5 text-[11px]">
+                  <div class="flex flex-wrap items-center justify-between gap-1.5">
+                    <span class="text-[var(--muted-foreground)]">Payload URL:</span>
+                    ${guideCopyInlineHtml(hookUrl, 'Webhook Payload URL')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-1.5">
+                    <span class="text-[var(--muted-foreground)]">Content type:</span>
+                    ${guideCopyInlineHtml('application/json', 'Content-Type')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-1.5">
+                    <span class="text-[var(--muted-foreground)]">Secret env trên VPS:</span>
+                    ${guideCopyInlineHtml('GITHUB_WEBHOOK_SECRET', 'GITHUB_WEBHOOK_SECRET')}
+                  </div>
+                </div>
+              </div>
+
+              ${wf.statusMessage ? `<div class="text-[11px] font-mono text-[var(--muted-foreground)]">Trạng thái gần nhất: ${esc(wf.statusMessage)}</div>` : ''}
+              ${wf.error ? `<div class="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400">${esc(wf.error)}</div>` : ''}
+            </div>
+
+            <div class="px-4 py-3 border-t border-[var(--border)] bg-[var(--sidebar)] flex flex-wrap items-center justify-between gap-2">
+              <div>
+                ${wf.active ? `<button type="button" ${wf.saving ? 'disabled' : ''} onclick="deleteProjectWebhook()" class="px-3 py-1.5 rounded-xl bg-rose-500/15 text-rose-400 border border-rose-500/30 text-xs font-medium hover:bg-rose-500/25">Gỡ Webhook</button>` : ''}
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" onclick="closeModal()" class="px-3 py-1.5 rounded-xl bg-[var(--secondary)] text-[var(--secondary-foreground)] border border-[var(--border)] text-xs font-medium">Đóng</button>
+                <button type="submit" ${wf.saving || !hasPerm ? 'disabled' : ''} class="px-4 py-1.5 rounded-xl bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white text-xs font-semibold shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                  ${wf.saving ? 'Đang gắn Webhook...' : '🔗 Lưu & Tự động gắn Webhook'}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      `;
+    }
+
+    function setGuideSection(sec) {
+      state.guideSection = sec || 'all';
+      renderMainView();
+    }
+
+    function renderGuide(container) {
+      const isMob = state.viewport === 'mobile';
+      const sec = state.guideSection || 'all';
+      const hookUrl = state.webhookUrl || `${defaultOrigin()}/api/v1/webhooks/github`;
+      const show = (k) => sec === 'all' || sec === k;
+      const tabs = [
+        { k: 'all', label: 'Tất cả Hướng dẫn' },
+        { k: 'webhook', label: '1. GitHub Webhook' },
+        { k: 'pat', label: '2. Tạo PAT & Phân quyền' },
+        { k: 'deploy', label: '3. Build & Next.js / SPA' },
+        { k: 'ssl', label: '4. Domain & Auto-SSL' }
+      ];
+
+      container.innerHTML = `
+        <div class="max-w-4xl mx-auto space-y-5 pb-8">
+          <!-- Hero Header -->
+          <div class="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/10 via-sky-500/5 to-[var(--card)] p-5 shadow-sm space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <span class="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-400 flex items-center justify-center shrink-0">📖</span>
+                <div>
+                  <h1 class="text-base font-bold text-[var(--foreground)]">Manual Guide — Hướng dẫn sử dụng DeploymentHub</h1>
+                  <p class="text-xs text-[var(--muted-foreground)]">Tài liệu Markdown style kèm nút Copy-to-Clipboard 1 chạm cho mọi URL, Scope, Header &amp; Lệnh vận hành.</p>
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                ${tabs.map(t => `
+                  <button type="button" onclick="setGuideSection('${t.k}')" class="px-2.5 py-1.5 rounded-xl text-xs font-semibold transition ${sec === t.k ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-sky-500 text-white shadow-sm' : 'bg-[var(--card)] text-[var(--muted-foreground)] border border-[var(--border)] hover:text-[var(--foreground)]'}">${esc(t.label)}</button>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+
+          ${show('webhook') ? `
+            <article class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 space-y-4 shadow-sm">
+              <h2 class="text-sm font-bold text-[var(--foreground)] border-b border-[var(--border)] pb-2"># 1. Cấu hình GitHub Webhook (Push-to-Deploy Tự Động)</h2>
+              <p class="text-xs text-[var(--muted-foreground)] leading-relaxed">
+                Khi bạn push commit mới lên nhánh cấu hình của Repository (ví dụ ${guideCopyInlineHtml('main', 'Tên nhánh main')}), GitHub sẽ gửi HTTP POST kèm chữ ký HMAC-SHA256 về DeploymentHub để tự động pull code mới, build Docker image và swap container không downtime.
+              </p>
+
+              <div class="space-y-2">
+                <h3 class="text-xs font-semibold text-[var(--foreground)]">## Cách A — Tự động gắn trực tiếp qua DeploymentHub (Khuyến nghị)</h3>
+                <ul class="list-disc pl-5 space-y-1.5 text-xs text-[var(--muted-foreground)] leading-relaxed">
+                  <li><strong>Với project mới:</strong> Tại Bước 1 Wizard, nhập GitHub PAT và bấm <strong>Kiểm tra quyền Webhook</strong>. Nếu PAT có quyền, ô <em>Tự động gắn GitHub Webhook</em> (mặc định đã tick sẵn) sẽ được mở khoá và gắn hook ngay sau khi Deploy thành công.</li>
+                  <li><strong>Với app đã deploy sẵn:</strong> Vào tab <strong>Tổng quan &amp; Projects</strong> → bấm nút <code class="font-mono text-indigo-400">🔗 Webhook</code> ngay trên thẻ app → nhập PAT → bấm <strong>Kiểm tra quyền</strong> → <strong>Lưu &amp; Tự động gắn Webhook</strong>.</li>
+                  <li><strong>Lưu ý an toàn:</strong> Nếu PAT không có quyền tạo Webhook, ô tích sẽ tự động khoá (grey out) kèm cảnh báo đỏ/vàng để bạn dùng Cách B bên dưới.</li>
+                </ul>
+              </div>
+
+              <div class="space-y-2.5">
+                <h3 class="text-xs font-semibold text-[var(--foreground)]">## Cách B — Gắn Webhook Thủ Công trên GitHub</h3>
+                <p class="text-xs text-[var(--muted-foreground)]">Mở repo trên GitHub → <strong>Settings</strong> → <strong>Webhooks</strong> → <strong>Add webhook</strong>, sau đó click icon copy từng mục dưới đây:</p>
+                <div class="rounded-xl border border-[var(--border)] bg-[var(--content)] p-3.5 space-y-2.5 text-xs">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-medium text-[var(--foreground)]">1. Payload URL:</span>
+                    ${guideCopyInlineHtml(hookUrl, 'Webhook Payload URL')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-medium text-[var(--foreground)]">2. Content type:</span>
+                    ${guideCopyInlineHtml('application/json', 'Content-Type application/json')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-medium text-[var(--foreground)]">3. Header xác thực GitHub gửi kèm:</span>
+                    ${guideCopyInlineHtml('X-Hub-Signature-256', 'Header X-Hub-Signature-256')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-medium text-[var(--foreground)]">4. Bỏ qua auto-deploy cho 1 commit:</span>
+                    ${guideCopyInlineHtml('[skip ci]', 'Commit flag [skip ci]')}
+                  </div>
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-medium text-[var(--foreground)]">5. Events:</span>
+                    <span class="font-mono text-emerald-400">Just the push event</span>
+                  </div>
+                </div>
+                ${guideCodeBlockHtml('Lấy giá trị GITHUB_WEBHOOK_SECRET hiện tại trên VPS để dán vào ô Secret trên GitHub', 'docker exec deploymenthub-control-plane printenv GITHUB_WEBHOOK_SECRET')}
+              </div>
+            </article>
+          ` : ''}
+
+          ${show('pat') ? `
+            <article class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 space-y-4 shadow-sm">
+              <h2 class="text-sm font-bold text-[var(--foreground)] border-b border-[var(--border)] pb-2"># 2. Tạo GitHub Personal Access Token (PAT) Đúng Quyền</h2>
+              <p class="text-xs text-[var(--muted-foreground)] leading-relaxed">
+                DeploymentHub mã hóa mọi PAT bằng <strong>AES-256-GCM Vault</strong> trước khi lưu xuống ổ cứng. Bạn chọn một trong hai loại token sau tại ${guideCopyInlineHtml('https://github.com/settings/tokens', 'GitHub Tokens Settings', false)}:
+              </p>
+
+              <div class="grid ${isMob ? 'grid-cols-1' : 'grid-cols-2'} gap-3 text-xs">
+                <div class="rounded-xl border border-[var(--border)] bg-[var(--content)] p-3.5 space-y-2">
+                  <div class="font-semibold text-indigo-400">Loại 1: Classic PAT (<code class="font-mono">ghp_...</code>)</div>
+                  <p class="text-[var(--muted-foreground)]">Dễ thiết lập nhất — tích chọn đủ 2 scope sau:</p>
+                  <div class="flex flex-wrap gap-1.5">
+                    ${guideCopyInlineHtml('repo', 'Scope repo')}
+                    ${guideCopyInlineHtml('admin:repo_hook', 'Scope admin:repo_hook')}
+                    ${guideCopyInlineHtml('write:repo_hook', 'Scope write:repo_hook')}
+                  </div>
+                </div>
+                <div class="rounded-xl border border-[var(--border)] bg-[var(--content)] p-3.5 space-y-2">
+                  <div class="font-semibold text-emerald-400">Loại 2: Fine-grained PAT (<code class="font-mono">github_pat_...</code>)</div>
+                  <p class="text-[var(--muted-foreground)]">Bảo mật theo từng repository cụ thể — bật Repository permissions:</p>
+                  <div class="flex flex-wrap gap-1.5">
+                    ${guideCopyInlineHtml('Contents: Read and write', 'Permission Contents')}
+                    ${guideCopyInlineHtml('Webhooks: Read and write', 'Permission Webhooks')}
+                    ${guideCopyInlineHtml('Metadata: Read-only', 'Permission Metadata')}
+                  </div>
+                </div>
+              </div>
+            </article>
+          ` : ''}
+
+          ${show('deploy') ? `
+            <article class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 space-y-4 shadow-sm">
+              <h2 class="text-sm font-bold text-[var(--foreground)] border-b border-[var(--border)] pb-2"># 3. Pipeline Build &amp; Next.js Standalone / Dockerfile</h2>
+              <ul class="list-disc pl-5 space-y-1.5 text-xs text-[var(--muted-foreground)] leading-relaxed">
+                <li><strong>Ưu tiên <code class="font-mono">Dockerfile</code> của Repo:</strong> Nếu repository đã có sẵn <code class="font-mono">Dockerfile</code> hợp lệ (có lệnh <code class="font-mono">FROM</code>), DeploymentHub sẽ giữ nguyên Dockerfile đó và tự đọc <code class="font-mono">EXPOSE</code> port.</li>
+                <li><strong>Next.js <code class="font-mono">output: 'standalone'</code>:</strong> Template tự động của hệ thống luôn copy đầy đủ <code class="font-mono">.next/static</code> và <code class="font-mono">public/</code> vào thư mục standalone để tránh lỗi 404 CSS/JS.</li>
+                <li><strong>Dọn sạch image thừa:</strong> Mỗi lần deploy đều chạy prune dangling images để giữ <code class="font-mono">&lt;none&gt;</code> images bằng 0.</li>
+              </ul>
+              ${guideCodeBlockHtml('Mẫu snippet COPY cho Next.js Standalone Dockerfile tùy biến', `COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+CMD ["node", "server.js"]`)}
+            </article>
+          ` : ''}
+
+          ${show('ssl') ? `
+            <article class="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 space-y-4 shadow-sm">
+              <h2 class="text-sm font-bold text-[var(--foreground)] border-b border-[var(--border)] pb-2"># 4. Domain, Cloudflare Wildcard &amp; Let's Encrypt Auto-SSL</h2>
+              <ul class="list-disc pl-5 space-y-1.5 text-xs text-[var(--muted-foreground)] leading-relaxed">
+                <li>Domain con dưới <code class="font-mono">*.bennasolutions.com</code> dùng chứng chỉ Wildcard DNS-01 qua Traefik tức thì — chỉ cần bật Proxy (Cam) trên Cloudflare hoặc trỏ IP VPS.</li>
+                <li>Với các app đã deploy, bấm nút ${guideCopyInlineHtml('🔒 SSL', 'Nút cấu hình SSL', false)} trên card project để đổi Domain hoặc ép HTTPS 301 Redirect.</li>
+              </ul>
+              ${guideCodeBlockHtml('Kiểm tra nhanh HTTP Status & TLS trên terminal', `curl -sI https://hub.bennasolutions.com/api/v1/health | grep -iE '^(http/|content-type)'
+docker image prune -f`)}
+            </article>
+          ` : ''}
+        </div>
+      `;
     }
 
     function filterModalLogs(val) {

@@ -448,6 +448,13 @@ func (e *Engine) runRealDockerDeployment(dep *deploymentState, req DeployRequest
 	dep.mu.Unlock()
 
 	e.registerCompletedDeployment(req, commitSHA, commitMsg, priorLogs, time.Now().UTC().Format("15:04:05")+" "+finalMsg)
+	if req.AutoWebhook && strings.Contains(req.RepoURL, "/") {
+		if whCfg, whErr := e.ConfigureProjectWebhook(req.AppName, req.RepoURL, req.Branch, req.PAT, true); whErr == nil && whCfg.Active {
+			e.emitDeployEvent(dep, 5, "running", fmt.Sprintf("[5/5] ✓ GitHub Webhook attached automatically to %s (Hook #%d -> %s)", whCfg.RepoURL, whCfg.HookID, whCfg.HookURL), false, secrets)
+		} else if whErr != nil {
+			e.emitDeployEvent(dep, 5, "running", fmt.Sprintf("[5/5] ! Auto-Webhook warning: %v", whErr), false, secrets)
+		}
+	}
 	e.SyncDockerEngine()
 	e.emitDeployEvent(dep, 5, "success", finalMsg, true, secrets)
 }

@@ -1717,3 +1717,84 @@ func TestDockerCheckpoint3StacksPullRunAndWebSocket(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectWebhookEndpointsAndPermissionCheck(t *testing.T) {
+	t.Setenv("WEBHOOKS_DATA_FILE", filepath.Join(t.TempDir(), "webhooks.json"))
+	t.Setenv("HUB_DOMAIN", "hub.example.com")
+
+	h, eng := newTestHandler(t, "hook-secret-123")
+	deploySyncForTest(t, eng, docker.DeployRequest{
+		AppName:    "studio-app",
+		RepoURL:    "https://github.com/example-org/studio-app",
+		Branch:     "main",
+		Domain:     "studio.localhost",
+		PresetKey:  "nextjs",
+		DetectMode: "hybrid",
+	})
+	ov := eng.GetOverview()
+	if len(ov.Projects) == 0 {
+		t.Fatal("expected deployed project")
+	}
+	pid := ov.Projects[0].ID
+
+	// 1. GET /projects/{id}/webhook returns defaults
+	resGet := doReq(t, h, http.MethodGet, "/api/v1/projects/"+pid+"/webhook", nil, nil)
+	if resGet.Code != http.StatusOK || !strings.Contains(resGet.Body.String(), `"autoWebhook":true`) {
+		t.Fatalf("GET /webhook failed: %d %s", resGet.Code, resGet.Body.String())
+	}
+
+	// 2. POST /projects/{id}/webhook/check with no-hook PAT returns canManageWebhook=false
+	resNoHook := doReq(t, h, http.MethodPost, "/api/v1/projects/"+pid+"/webhook/check", map[string]string{
+		"repoUrl": "https://github.com/example-org/studio-app",
+		"branch":  "main",
+		"pat":     "ghp_nohook_readonly1234",
+	}, nil)
+	if resNoHook.Code != http.StatusOK || !strings.Contains(resNoHook.Body.String(), `"canManageWebhook":false`) {
+		t.Fatalf("POST /webhook/check readonly mismatch: %d %s", resNoHook.Code, resNoHook.Body.String())
+	}
+
+	// 3. POST /projects/{id}/webhook/check with valid hook PAT returns canManageWebhook=true
+	resOKHook := doReq(t, h, http.MethodPost, "/api/v1/projects/"+pid+"/webhook/check", map[string]string{
+		"repoUrl": "https://github.com/example-org/studio-app",
+		"branch":  "main",
+		"pat":     "ghp_admin_full_token1234",
+	}, nil)
+	if resOKHook.Code != http.StatusOK || !strings.Contains(resOKHook.Body.String(), `"canManageWebhook":true`) {
+		t.Fatalf("POST /webhook/check full perm mismatch: %d %s", resOKHook.Code, resOKHook.Body.String())
+	}
+
+	// 4. POST /projects/{id}/webhook attaches webhook & returns active=true
+	resAttach := doReq(t, h, http.MethodPost, "/api/v1/projects/"+pid+"/webhook", map[string]any{
+		"repoUrl":     "https://github.com/example-org/studio-app",
+		"branch":      "main",
+		"pat":         "ghp_admin_full_token1234",
+		"autoWebhook": true,
+	}, nil)
+	if resAttach.Code != http.StatusOK || !strings.Contains(resAttach.Body.String(), `"active":true`) {
+		t.Fatalf("POST /webhook attach failed: %d %s", resAttach.Code, resAttach.Body.String())
+	}
+
+	// 5. DELETE /projects/{id}/webhook clears active webhook
+	resDel := doReq(t, h, http.MethodDelete, "/api/v1/projects/"+pid+"/webhook", nil, nil)
+	if resDel.Code != http.StatusOK || !strings.Contains(resDel.Body.String(), `"active":false`) {
+		t.Fatalf("DELETE /webhook failed: %d %s", resDel.Code, resDel.Body.String())
+	}
+
+	// 6. Auth gate enforcement -> 401 when unauthenticated
+	v, _ := vault.New("auth-wh-secret")
+	authMgr := auth.NewManagerWithConfig(v, filepath.Join(t.TempDir(), "auth_wh.json"), auth.DefaultAdminEmail, true)
+	hAuth := NewWithAuth(eng, v, "hook", fstest.MapFS{}, authMgr)
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/projects/" + pid + "/webhook"},
+		{http.MethodPost, "/api/v1/projects/" + pid + "/webhook/check"},
+		{http.MethodPost, "/api/v1/projects/" + pid + "/webhook"},
+		{http.MethodDelete, "/api/v1/projects/" + pid + "/webhook"},
+	} {
+		if r401 := doReq(t, hAuth, tc.method, tc.path, nil, nil); r401.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on %s %s, got %d", tc.method, tc.path, r401.Code)
+		}
+	}
+}

@@ -80,18 +80,7 @@ func validateStackName(raw string) (string, error) {
 }
 
 func resolveStacksDir() string {
-	if custom := strings.TrimSpace(os.Getenv("STACKS_DIR")); custom != "" {
-		if err := os.MkdirAll(custom, 0o750); err == nil {
-			return custom
-		}
-	}
-	const defaultDir = "/data/stacks"
-	if err := os.MkdirAll(defaultDir, 0o750); err == nil {
-		return defaultDir
-	}
-	fallback := filepath.Join(os.TempDir(), "deploymenthub-stacks")
-	_ = os.MkdirAll(fallback, 0o750)
-	return fallback
+	return resolveDataSubpath("STACKS_DIR", "stacks", true)
 }
 
 func randomStackPassword(nBytes int) string {

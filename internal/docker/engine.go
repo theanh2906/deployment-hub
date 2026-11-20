@@ -64,9 +64,12 @@ type Project struct {
 	CPU        float64  `json:"cpu"`
 	RAMMb      int      `json:"ramMb"`
 	RAMLimitMb int      `json:"ramLimitMb"`
-	Port       string   `json:"port"`
-	UpdatedAt  string   `json:"updatedAt"`
-	Logs       []string `json:"logs"`
+	Port          string   `json:"port"`
+	UpdatedAt     string   `json:"updatedAt"`
+	Logs          []string `json:"logs"`
+	WebhookActive bool     `json:"webhookActive"`
+	WebhookID     int64    `json:"webhookId,omitempty"`
+	WebhookStatus string   `json:"webhookStatus,omitempty"`
 }
 
 // Container represents a Docker container instance associated with a project.
@@ -231,6 +234,12 @@ type Engine struct {
 	registries             []storedRegistry
 	registriesLoaded       bool
 	registriesLoadedPath   string
+	webhooksMu             sync.RWMutex
+	webhooksStore          webhooksStoreFile
+	webhooksLoaded         bool
+	webhooksLoadedPath     string
+	webhookSecret          string
+	githubAPIBase          string
 }
 
 // NewEngine initializes the control plane Engine with real host telemetry.
@@ -396,6 +405,7 @@ func (e *Engine) GetOverview() Overview {
 	projects := make([]Project, len(e.projects))
 	for i, p := range e.projects {
 		projects[i] = cloneProject(p)
+		e.enrichProjectWebhookLocked(&projects[i])
 	}
 	containers := make([]Container, len(e.containers))
 	for i, c := range e.containers {
@@ -413,7 +423,7 @@ func (e *Engine) GetOverview() Overview {
 		Containers:  containers,
 		Images:      images,
 		ProxyRoutes: routes,
-		WebhookURL:  e.webhookURL,
+		WebhookURL:  e.PublicWebhookURL(),
 	}
 }
 
@@ -422,19 +432,70 @@ func (e *Engine) GetOverview() Overview {
 func (e *Engine) RedeployProject(id string) (Project, error) {
 	e.mu.RLock()
 	pIdx := e.findProjectIndexLocked(id)
-	var projName, runtimeMode, endpoint string
+	var proj Project
+	var runtimeMode, endpoint string
 	var cntIDs []string
 	if pIdx >= 0 {
-		projName = e.projects[pIdx].Name
+		proj = cloneProject(e.projects[pIdx])
 		runtimeMode = e.vps.RuntimeMode
 		endpoint = e.vps.SocketEndpoint
 		for _, c := range e.containers {
-			if c.Project == projName {
+			if c.Project == proj.Name {
 				cntIDs = append(cntIDs, c.ID)
 			}
 		}
 	}
 	e.mu.RUnlock()
+
+	if pIdx < 0 {
+		return Project{}, fmt.Errorf("project %q not found", id)
+	}
+
+	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" &&
+		!strings.HasPrefix(endpoint, "http://127.0.0.1:") &&
+		!isSyntheticTestRepo(proj.Repo) && strings.Contains(proj.Repo, "/") && !strings.Contains(proj.Repo, ":") {
+		cport := extractContainerPortFromSummary(proj.Port)
+		envVars := fetchContainerEnvVarsForRedeploy(endpoint, "dh-"+proj.Name)
+		pat := e.ResolveSavedPAT(proj.Name)
+		if pat == "" {
+			pat = e.ResolveSavedPAT(proj.Repo)
+		}
+		branch := strings.TrimSpace(proj.Branch)
+		if branch == "" || branch == "live" {
+			branch = "main"
+		}
+		scmMode := "oauth"
+		if pat != "" {
+			scmMode = "pat"
+		}
+		presetKey := proj.StackKey
+		if presetKey == "" || !isValidPreset(presetKey) {
+			presetKey = "auto"
+		}
+		_, _ = e.StartDeployment(DeployRequest{
+			AppName:     proj.Name,
+			RepoURL:     proj.Repo,
+			Branch:      branch,
+			Domain:      proj.Domain,
+			SCMMode:     scmMode,
+			PAT:         pat,
+			DetectMode:  "hybrid",
+			PresetKey:   presetKey,
+			PortMapping: cport + ":" + cport,
+			EnvVars:     envVars,
+			AutoWebhook: false,
+		})
+
+		e.mu.Lock()
+		if idx := e.findProjectIndexLocked(id); idx >= 0 {
+			e.projects[idx].Status = "Building..."
+			e.projects[idx].UpdatedAt = "Đang rebuild từ Git..."
+			proj = cloneProject(e.projects[idx])
+			e.enrichProjectWebhookLocked(&proj)
+		}
+		e.mu.Unlock()
+		return proj, nil
+	}
 
 	if runtimeMode == "docker" && strings.TrimSpace(endpoint) != "" {
 		for _, cid := range cntIDs {
@@ -857,9 +918,12 @@ func (e *Engine) ToggleProxySSL(id string) (ProxyRoute, error) {
 }
 
 // VerifyPAT validates a GitHub Personal Access Token, encrypts it via Vault,
-// runs stack detection, and returns metadata without echoing the raw token.
+// probes GitHub webhook permissions, and returns metadata without echoing the raw token.
 func (e *Engine) VerifyPAT(token, repoURL string) (map[string]any, error) {
 	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		trimmed = e.ResolveSavedPAT(repoURL)
+	}
 	hasGHPrefix := strings.HasPrefix(trimmed, "ghp_") || strings.HasPrefix(trimmed, "github_pat_")
 	if trimmed == "" || (!hasGHPrefix && len(trimmed) < 10) || (hasGHPrefix && len(trimmed) < 6) {
 		return nil, errors.New("invalid GitHub PAT: expected len >= 10 or ghp_/github_pat_ token")
@@ -873,19 +937,15 @@ func (e *Engine) VerifyPAT(token, repoURL string) (map[string]any, error) {
 	e.mu.Lock()
 	e.encryptedSecrets["pat:"+repoURL] = enc
 	e.mu.Unlock()
+	e.saveDefaultPAT(trimmed)
 
 	previewLen := min(24, len(enc))
 	preview := enc[:previewLen] + "..."
 
-	scopes := []string{"repo", "read:user", "admin:repo_hook"}
-	ghUser := ""
-	if !isSyntheticTestRepo(repoURL) {
-		if login, ghScopes, ok := probeGitHubToken(trimmed); ok {
-			ghUser = login
-			if len(ghScopes) > 0 {
-				scopes = ghScopes
-			}
-		}
+	check := e.CheckGitHubWebhookPermission(trimmed, repoURL)
+	scopes := check.Scopes
+	if len(scopes) == 0 && check.Valid {
+		scopes = []string{"repo"}
 	}
 
 	detectRes := detector.Detect(detector.DetectRequest{
@@ -896,14 +956,19 @@ func (e *Engine) VerifyPAT(token, repoURL string) (map[string]any, error) {
 	})
 
 	out := map[string]any{
-		"valid":                 true,
+		"valid":                 check.Valid,
 		"encryptedTokenPreview": preview,
 		"repo":                  repoURL,
 		"scopes":                scopes,
+		"canManageWebhook":      check.CanManageWebhook,
+		"webhookReason":         check.WebhookReason,
+		"existingHookId":        check.ExistingHookID,
+		"existingHookUrl":       check.ExistingHookURL,
+		"webhookUrl":            e.PublicWebhookURL(),
 		"detectResult":          detectRes,
 	}
-	if ghUser != "" {
-		out["githubUser"] = ghUser
+	if check.GitHubUser != "" {
+		out["githubUser"] = check.GitHubUser
 	}
 	return out, nil
 }

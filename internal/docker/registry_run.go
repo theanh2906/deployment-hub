@@ -65,14 +65,7 @@ type RunContainerRequest struct {
 }
 
 func resolveRegistriesFilePath() string {
-	if custom := strings.TrimSpace(os.Getenv("REGISTRIES_DATA_FILE")); custom != "" {
-		return custom
-	}
-	const defPath = "/data/registries.json"
-	if err := os.MkdirAll(filepath.Dir(defPath), 0o750); err == nil {
-		return defPath
-	}
-	return filepath.Join(os.TempDir(), "deploymenthub-registries.json")
+	return resolveDataSubpath("REGISTRIES_DATA_FILE", "registries.json", false)
 }
 
 func (e *Engine) loadRegistriesLocked() {
